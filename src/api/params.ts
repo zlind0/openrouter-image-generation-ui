@@ -60,7 +60,7 @@ export function buildParamFields(supported: Record<string, CapabilityDescriptor>
   }
   const seed = get('seed')
   if (seed) {
-    fields.push({ key: 'seed', label: 'Seed', kind: 'number', defaultValue: '', hint: '留空为随机；填整数可复现' })
+    fields.push({ key: 'seed', label: 'Seed', kind: 'number', defaultValue: undefined, hint: '留空为随机；填整数可复现' })
   }
   const size = get('size')
   if (size) {
