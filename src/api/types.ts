@@ -91,4 +91,7 @@ export interface HistoryItem {
   images: GeneratedImage[]
   usage?: GenerateResponse['usage']
   error?: string
+  params?: Record<string, unknown>
+  providerChoice?: string
+  references?: ReferenceImage[]
 }

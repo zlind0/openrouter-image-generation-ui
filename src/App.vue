@@ -2,8 +2,29 @@
   <div class="app">
     <div class="topbar">
       <h1>OpenRouter 图像生成</h1>
+      <div class="model-select">
+        <button class="btn secondary small" @click="showModelMenu = !showModelMenu" :title="selectedId || '选择模型'">
+          {{ selectedId || '选择模型' }} ▾
+        </button>
+        <div v-if="showModelMenu" class="menu-backdrop" @click="showModelMenu = false"></div>
+        <div v-if="showModelMenu" class="model-menu">
+          <input v-model="search" placeholder="搜索模型 id / name" />
+          <div v-if="modelsError" class="err">{{ modelsError }}</div>
+          <div class="menu-count">{{ filteredModels.length }}/{{ models.length }}</div>
+          <div v-for="m in filteredModels" :key="m.id"
+            class="model-item" :class="{ active: m.id === selectedId }" @click="pickModel(m.id)">
+            <div class="name">{{ m.name }}</div>
+            <div class="id">{{ m.id }}</div>
+            <div class="meta">
+              输入: {{ m.architecture.input_modalities.join(',') }} ·
+              {{ m.supports_streaming ? '支持流式' : '非流式' }} ·
+              参数: {{ Object.keys(m.supported_parameters).join(', ') || '—' }}
+            </div>
+          </div>
+        </div>
+      </div>
       <div class="keybox">
-        <input v-model="apiKey" type="password" placeholder="设置界面：输入 OpenRouter API Key (sk-or-...)" @change="saveKey" />
+        <input v-model="apiKey" type="password" placeholder="输入 OpenRouter API Key (sk-or-...)" @change="saveKey" />
         <button class="btn secondary" @click="saveKey">保存 Key</button>
         <button class="btn secondary" @click="loadModels" :disabled="!apiKey || loadingModels">
           {{ loadingModels ? '加载中…' : '刷新模型' }}
@@ -14,32 +35,13 @@
     </div>
 
     <div class="main">
-      <!-- 左：模型列表 -->
-      <div class="col left">
-        <h2>模型 ({{ filteredModels.length }}/{{ models.length }})</h2>
-        <div class="field search">
-          <input v-model="search" placeholder="搜索模型 id / name" />
-        </div>
-        <div v-if="modelsError" class="err">{{ modelsError }}</div>
-        <div v-for="m in filteredModels" :key="m.id"
-          class="model-card" :class="{ active: m.id === selectedId }" @click="selectModel(m.id)">
-          <div class="name">{{ m.name }}</div>
-          <div class="id">{{ m.id }}</div>
-          <div class="meta">
-            输入: {{ m.architecture.input_modalities.join(',') }} ·
-            {{ m.supports_streaming ? '支持流式' : '非流式' }} ·
-            参数: {{ Object.keys(m.supported_parameters).join(', ') || '—' }}
-          </div>
-        </div>
-      </div>
-
       <!-- 中：提示词 + 参数 + 参考图 -->
       <div class="col center">
         <h2>生成 · {{ selectedId || '未选择模型' }}</h2>
         <div class="field">
           <label>Prompt *</label>
-          <textarea v-model="prompt" class="prompt" placeholder="描述你想要的画面…" @paste="onPaste"></textarea>
-          <div class="hint">支持在输入框内直接 Ctrl/Cmd+V 粘贴剪贴板图片为参考图</div>
+          <textarea v-model="prompt" class="prompt" placeholder="描述你想要的画面…"></textarea>
+          <div class="hint">任意位置 Ctrl/Cmd+V 粘贴剪贴板图片即可作为参考图</div>
         </div>
 
         <div v-if="endpoints.length" class="field">
@@ -75,7 +77,7 @@
         </div>
 
         <div class="field">
-          <label>参考图片（image-to-image，可选，最多 16 张）</label>
+          <label>参考图片（image-to-image，可选，最多 16 张，点击放大）</label>
           <div class="row" style="margin-bottom:8px">
             <button class="btn secondary" @click="pickFiles">选择文件</button>
             <input v-model="imageUrl" placeholder="或粘贴图片 URL 后点添加" style="flex:1" />
@@ -83,12 +85,12 @@
           </div>
           <div class="refs">
             <div v-for="(r, i) in references" :key="i" class="ref">
-              <img :src="r.dataUrl" :title="r.name" />
+              <img :src="r.dataUrl" :title="r.name" @click="openViewer(r.dataUrl, r.name)" />
               <button @click="references.splice(i, 1)">✕</button>
             </div>
           </div>
-          <div class="dropzone" @dragover.prevent @drop.prevent="onDrop" @paste="onPaste" tabindex="0">
-            拖拽图片到此处 / 点击此处后 Ctrl+V 粘贴剪贴板图片
+          <div class="dropzone" @dragover.prevent @drop.prevent="onDrop" tabindex="0">
+            拖拽图片到此处 / 任意位置 Ctrl+V 粘贴剪贴板图片
           </div>
         </div>
 
@@ -103,14 +105,14 @@
 
         <div class="result" style="margin-top:12px" v-if="partialB64">
           <h2>流式预览</h2>
-          <img :src="'data:image/png;base64,' + partialB64" />
+          <img :src="'data:image/png;base64,' + partialB64" @click="openViewer('data:image/png;base64,' + partialB64, '流式预览')" />
         </div>
 
         <div style="margin-top:12px" v-if="currentImages.length">
-          <h2>本次结果（{{ currentImages.length }} 张）</h2>
+          <h2>本次结果（{{ currentImages.length }} 张，点击放大）</h2>
           <div class="result-grid">
             <div v-for="(img, i) in currentImages" :key="i" class="result-item">
-              <img :src="dataUrlOf(img)" />
+              <img :src="dataUrlOf(img)" @click="openViewer(dataUrlOf(img), `生成结果 ${i + 1}`)" />
               <div class="row" style="display:flex;gap:6px;margin-top:6px">
                 <button class="btn secondary" @click="saveImage(img, i)">保存</button>
                 <button class="btn secondary" @click="useAsReference(img)">作为参考图</button>
@@ -122,17 +124,23 @@
 
       <!-- 右：历史 -->
       <div class="col right">
-        <h2>历史（{{ history.length }}）</h2>
-        <div v-if="!history.length" class="status">暂无生成记录（仅本机内存 + localStorage 缩略图不持久化大图）</div>
-        <div v-for="h in history" :key="h.id" class="history-item">
-          <div class="kv">{{ new Date(h.time).toLocaleString() }} · {{ h.model }}</div>
+        <div class="h-title">
+          <h2>历史（{{ history.length }}，点击还原）</h2>
+          <button v-if="history.length" class="btn danger small" @click="clearHistory">清空</button>
+        </div>
+        <div v-if="!history.length" class="status">暂无生成记录</div>
+        <div v-for="h in history" :key="h.id" class="history-item" @click="restoreHistory(h)" title="点击还原 prompt / 参数 / 参考图到编辑区">
+          <div class="h-head">
+            <div class="kv">{{ new Date(h.time).toLocaleString() }} · {{ h.model }}</div>
+            <button class="btn danger small" @click.stop="deleteHistory(h.id)">删除</button>
+          </div>
           <div class="p">{{ h.prompt }}</div>
           <div v-if="h.error" class="err">{{ h.error }}</div>
           <div v-else class="result-grid">
             <div v-for="(img, i) in h.images" :key="i" class="result-item">
-              <img :src="dataUrlOf(img)" />
+              <img :src="dataUrlOf(img)" @click.stop="openViewer(dataUrlOf(img), `${h.model} · ${i + 1}`)" />
               <div class="row" style="display:flex;gap:6px;margin-top:6px">
-                <button class="btn secondary" @click="saveImage(img, i)">保存</button>
+                <button class="btn secondary" @click.stop="saveImage(img, i)">保存</button>
               </div>
             </div>
           </div>
@@ -140,22 +148,29 @@
         </div>
       </div>
     </div>
+
+    <!-- 大图查看 -->
+    <div v-if="viewer" class="lightbox" @click="viewer = null">
+      <img :src="viewer.src" @click.stop />
+      <div class="lightbox-title">{{ viewer.title }}（点击空白处关闭）</div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listImageModels, listModelEndpoints, generateImages, generateImagesStream } from './api/openrouter'
+import { loadHistory, persistHistory } from './api/historyStore'
 import { buildParamFields, cleanParams, type ParamField } from './api/params'
 import type { GeneratedImage, HistoryItem, ImageEndpoint, ImageModelListItem, ReferenceImage } from './api/types'
 
 const LS_KEY = 'or-img-api-key'
-const LS_HISTORY = 'or-img-history'
 
 const apiKey = ref(localStorage.getItem(LS_KEY) || '')
 const models = ref<ImageModelListItem[]>([])
 const endpoints = ref<ImageEndpoint[]>([])
 const search = ref('')
+const showModelMenu = ref(false)
 const selectedId = ref('')
 const prompt = ref('')
 const paramFields = ref<ParamField[]>([])
@@ -172,18 +187,13 @@ const usageText = ref('')
 const currentImages = ref<GeneratedImage[]>([])
 const partialB64 = ref('')
 const history = ref<HistoryItem[]>([])
-
-try {
-  const h = JSON.parse(localStorage.getItem(LS_HISTORY) || '[]')
-  if (Array.isArray(h)) history.value = h.slice(0, 20)
-} catch { /* ignore */ }
+const viewer = ref<{ src: string; title: string } | null>(null)
 
 const filteredModels = computed(() => {
   const q = search.value.trim().toLowerCase()
   if (!q) return models.value
   return models.value.filter((m) => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q))
 })
-const selectedModel = computed(() => models.value.find((m) => m.id === selectedId.value))
 const activeEndpoint = computed(() =>
   providerChoice.value ? endpoints.value.find((e) => e.provider_slug === providerChoice.value) : endpoints.value[0],
 )
@@ -201,6 +211,17 @@ function minPrice(e: ImageEndpoint): string {
   return arr.length ? Math.min(...arr).toFixed(4) : '?'
 }
 
+function openViewer(src: string, title: string) {
+  viewer.value = { src, title }
+}
+
+function onKey(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    viewer.value = null
+    showModelMenu.value = false
+  }
+}
+
 async function loadModels() {
   if (!apiKey.value) { modelsError.value = '请先填写 API Key'; return }
   loadingModels.value = true
@@ -216,6 +237,11 @@ async function loadModels() {
   }
 }
 
+function pickModel(id: string) {
+  showModelMenu.value = false
+  if (id !== selectedId.value) selectModel(id)
+}
+
 async function selectModel(id: string) {
   selectedId.value = id
   providerChoice.value = ''
@@ -225,7 +251,7 @@ async function selectModel(id: string) {
   const m = models.value.find((x) => x.id === id)
   // 先用模型级 supported_parameters 给默认值
   if (m) applyFields(m.supported_parameters)
-  // 再拉端点级精确参数（取所选 provider 或首个端点的交集展示）
+  // 再拉端点级精确参数
   try {
     const eps = await listModelEndpoints(apiKey.value, id)
     endpoints.value = eps
@@ -259,7 +285,7 @@ function dataUrlOf(img: GeneratedImage): string {
   return `data:${mime};base64,${img.b64_json}`
 }
 
-// ---- 参考图：文件选择 / 拖拽 / 剪贴板粘贴 ----
+// ---- 参考图：文件选择 / 拖拽 / 剪贴板粘贴（单一 document 监听，避免重复） ----
 async function pickFiles() {
   if (window.electronAPI) {
     const pics = await window.electronAPI.pickImages()
@@ -272,11 +298,7 @@ async function pickFiles() {
   input.multiple = true
   input.onchange = () => {
     if (!input.files) return
-    for (const f of Array.from(input.files).slice(0, 16 - references.value.length)) {
-      const rd = new FileReader()
-      rd.onload = () => references.value.push({ name: f.name, dataUrl: String(rd.result) })
-      rd.readAsDataURL(f)
-    }
+    filesToRefs(Array.from(input.files))
   }
   input.click()
 }
@@ -288,9 +310,16 @@ function addUrl() {
   imageUrl.value = ''
 }
 
+// 2 秒内同名同大小同时间戳的文件视为重复事件，去重
+const recentFiles = new Set<string>()
+
 function filesToRefs(files: FileList | File[]) {
   for (const f of Array.from(files).slice(0, 16 - references.value.length)) {
     if (!f.type.startsWith('image/')) continue
+    const key = `${f.name}|${f.size}|${f.lastModified}`
+    if (recentFiles.has(key)) continue
+    recentFiles.add(key)
+    setTimeout(() => recentFiles.delete(key), 2000)
     const rd = new FileReader()
     rd.onload = () => references.value.push({ name: f.name, dataUrl: String(rd.result) })
     rd.readAsDataURL(f)
@@ -301,36 +330,28 @@ function onDrop(e: DragEvent) {
   if (e.dataTransfer?.files?.length) filesToRefs(e.dataTransfer.files)
 }
 
-function onPaste(e: ClipboardEvent) {
+/** 全局唯一粘贴入口：有图片才拦截，无图片放行（保证文本正常粘贴）。 */
+function handlePaste(e: ClipboardEvent) {
+  if (e.defaultPrevented) return
+  const files: File[] = []
   const items = e.clipboardData?.items
-  if (!items) return
-  for (const it of Array.from(items)) {
-    if (it.type.startsWith('image/')) {
-      const f = it.getAsFile()
-      if (f) {
-        e.preventDefault()
-        filesToRefs([f])
+  if (items) {
+    for (const it of Array.from(items)) {
+      if (it.kind === 'file' && it.type.startsWith('image/')) {
+        const f = it.getAsFile()
+        if (f) files.push(f)
       }
     }
   }
-}
-
-document.addEventListener('paste', (e) => {
-  // 全局兜底：剪贴板图片直接作为参考图
-  const items = e.clipboardData?.items
-  if (!items) return
-  const target = e.target as HTMLElement
-  if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
-    // 输入框内的粘贴由 onPaste 处理，避免重复
-    return
-  }
-  for (const it of Array.from(items)) {
-    if (it.type.startsWith('image/')) {
-      const f = it.getAsFile()
-      if (f) filesToRefs([f])
+  if (!files.length && e.clipboardData?.files?.length) {
+    for (const f of Array.from(e.clipboardData.files)) {
+      if (f.type.startsWith('image/')) files.push(f)
     }
   }
-})
+  if (!files.length) return
+  e.preventDefault()
+  filesToRefs(files)
+}
 
 // ---- 生成 ----
 async function generate() {
@@ -364,7 +385,6 @@ async function generate() {
         }
       })
       if (!currentImages.value.length && !error.value) {
-        // 某些端点忽略 stream，走缓冲需再请求一次由服务端判断；此处提示即可
         statusText.value = '流式无 completed 事件，可能端点不支持 stream'
       }
     } else {
@@ -383,6 +403,7 @@ async function generate() {
   }
 }
 
+// ---- 历史：IndexedDB 全量持久化（含图），点击还原，单条删除 ----
 function pushHistory(h: { images: GeneratedImage[]; usage?: HistoryItem['usage']; error?: string }) {
   history.value.unshift({
     id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -392,12 +413,40 @@ function pushHistory(h: { images: GeneratedImage[]; usage?: HistoryItem['usage']
     images: h.images,
     usage: h.usage,
     error: h.error,
+    params: { ...paramValues.value },
+    providerChoice: providerChoice.value,
+    references: references.value.map((r) => ({ ...r })),
   })
-  history.value = history.value.slice(0, 20)
-  try {
-    // 大图 base64 不进 localStorage，只存元信息
-    localStorage.setItem(LS_HISTORY, JSON.stringify(history.value.map((x) => ({ ...x, images: [] }))))
-  } catch { /* ignore */ }
+  history.value = history.value.slice(0, 50)
+  persistHistory(history.value).catch((e) => {
+    statusText.value = `历史保存失败：${e instanceof Error ? e.message : String(e)}`
+  })
+}
+
+async function restoreHistory(h: HistoryItem) {
+  prompt.value = h.prompt
+  references.value = (h.references ?? []).map((r) => ({ ...r }))
+  currentImages.value = [...h.images]
+  error.value = h.error ?? ''
+  usageText.value = h.usage ? `cost: $${h.usage.cost ?? '?'} · tokens: ${h.usage.total_tokens}` : ''
+  if (h.model !== selectedId.value) await selectModel(h.model)
+  if (h.params) {
+    for (const [k, v] of Object.entries(h.params)) paramValues.value[k] = v
+  }
+  providerChoice.value = h.providerChoice ?? ''
+  statusText.value = `已还原：${h.model}`
+  document.querySelector('.col.center')?.scrollTo({ top: 0 })
+}
+
+function deleteHistory(id: string) {
+  history.value = history.value.filter((h) => h.id !== id)
+  persistHistory(history.value).catch(() => {})
+}
+
+function clearHistory() {
+  if (!confirm(`确定删除全部 ${history.value.length} 条历史吗？`)) return
+  history.value = []
+  persistHistory(history.value).catch(() => {})
 }
 
 function clearResults() {
@@ -428,7 +477,28 @@ function useAsReference(img: GeneratedImage) {
   references.value.push({ name: '生成结果', dataUrl: dataUrlOf(img) })
 }
 
-onMounted(() => {
+onMounted(async () => {
+  document.addEventListener('paste', handlePaste)
+  window.addEventListener('keydown', onKey)
+  try {
+    history.value = await loadHistory()
+  } catch {
+    history.value = []
+  }
+  // 兼容旧版本 localStorage 历史（仅元信息），合并后清理
+  try {
+    const legacy = JSON.parse(localStorage.getItem('or-img-history') || '[]')
+    if (Array.isArray(legacy) && legacy.length && !history.value.length) {
+      history.value = legacy.slice(0, 50)
+      persistHistory(history.value).catch(() => {})
+    }
+    localStorage.removeItem('or-img-history')
+  } catch { /* ignore */ }
   if (apiKey.value) loadModels()
+})
+
+onUnmounted(() => {
+  document.removeEventListener('paste', handlePaste)
+  window.removeEventListener('keydown', onKey)
 })
 </script>
