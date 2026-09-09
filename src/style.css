@@ -3,7 +3,9 @@
 body { margin: 0; background: #101418; color: #e8edf2; }
 button, input, select, textarea { font: inherit; }
 .app { display: flex; flex-direction: column; height: 100vh; }
-.topbar { display: flex; gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid #26303a; background: #161c22; }
+.topbar { display: flex; gap: 12px; align-items: center; padding: 10px 16px 10px 80px; border-bottom: 1px solid #26303a; background: #161c22; -webkit-app-region: drag; user-select: none; }
+/* 可交互控件退出拖拽区，否则点不了 */
+.topbar button, .topbar input, .topbar select, .topbar .model-menu { -webkit-app-region: no-drag; }
 .topbar h1 { font-size: 15px; margin: 0; white-space: nowrap; }
 .topbar .spacer { flex: 1; }
 .keybox { display: flex; gap: 8px; align-items: center; }

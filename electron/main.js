@@ -12,6 +12,11 @@ function createWindow() {
     minHeight: 700,
     title: 'OpenRouter ImageGen UI',
     icon: path.join(__dirname, '../build/icon.png'),
+    backgroundColor: '#161c22',
+    // macOS：隐藏原生白色标题栏，红绿灯直接嵌进应用顶栏
+    ...(process.platform === 'darwin'
+      ? { titleBarStyle: 'hidden', trafficLightPosition: { x: 12, y: 19 } }
+      : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
