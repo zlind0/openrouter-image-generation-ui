@@ -8,6 +8,7 @@
         :filter-method="filterModels"
         placeholder="选择模型"
         class="model-picker"
+        popper-class="model-picker-popper"
         :loading="loadingModels"
         @change="selectModel"
       >
