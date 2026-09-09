@@ -12,7 +12,7 @@ function headers(apiKey: string) {
     Authorization: `Bearer ${apiKey}`,
     'Content-Type': 'application/json',
     'HTTP-Referer': 'https://localhost/openrouter-image-client',
-    'X-Title': 'OpenRouter Image Client',
+    'X-Title': 'OpenRouter ImageGen UI',
   }
 }
 

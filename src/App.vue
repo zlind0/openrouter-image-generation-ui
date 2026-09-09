@@ -1,7 +1,7 @@
 <template>
   <div class="app">
     <div class="topbar">
-      <h1>OpenRouter 图像生成</h1>
+      <h1>OpenRouter ImageGen UI</h1>
       <div class="model-select">
         <button class="btn secondary small" @click="showModelMenu = !showModelMenu" :title="selectedId || '选择模型'">
           {{ selectedId || '选择模型' }} ▾

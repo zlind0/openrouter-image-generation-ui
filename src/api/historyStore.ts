@@ -31,15 +31,40 @@ export async function loadHistory(): Promise<HistoryItem[]> {
   }
 }
 
+/** 去 Vue 响应式 Proxy，只保留纯 JSON 数据，保证 structured clone 可用。 */
+function toStorable(items: HistoryItem[]): HistoryItem[] {
+  return items.map((it) => ({
+    id: String(it.id),
+    time: Number(it.time),
+    model: String(it.model ?? ''),
+    prompt: String(it.prompt ?? ''),
+    images: Array.isArray(it.images)
+      ? it.images.map((img) => ({
+          b64_json: String(img?.b64_json ?? ''),
+          ...(img?.media_type ? { media_type: String(img.media_type) } : {}),
+        }))
+      : [],
+    ...(it.usage ? { usage: JSON.parse(JSON.stringify(it.usage)) } : {}),
+    ...(it.error ? { error: String(it.error) } : {}),
+    ...(it.params ? { params: JSON.parse(JSON.stringify(it.params)) } : {}),
+    ...(typeof it.providerChoice === 'string' ? { providerChoice: it.providerChoice } : {}),
+    ...(Array.isArray(it.references)
+      ? { references: it.references.map((r) => ({ name: String(r?.name ?? ''), dataUrl: String(r?.dataUrl ?? '') })) }
+      : {}),
+  })) as HistoryItem[]
+}
+
 /** 全量覆盖保存。 */
 export async function persistHistory(items: HistoryItem[]): Promise<void> {
+  // 先转纯对象：history.value 是 Vue 响应式 Proxy，直接 put 会报 could not be cloned
+  const plain = toStorable(items)
   const db = await openDb()
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite')
       const st = tx.objectStore(STORE)
       st.clear()
-      for (const it of items) st.put(it)
+      for (const it of plain) st.put(it)
       tx.oncomplete = () => resolve()
       tx.onerror = () => reject(tx.error)
     })
