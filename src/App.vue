@@ -1,7 +1,17 @@
 <template>
   <div class="app">
+    <!-- 自绘标题栏：Win/Linux frameless 右置原生按钮替代，macOS 左侧给红绿灯留位 -->
+    <div class="titlebar" :class="{ mac: isMac }" @dblclick="onTitleDblClick">
+      <div class="tb-title">OpenRouter ImageGen UI</div>
+      <div class="tb-btns" v-if="isFrameless">
+        <button class="tb-btn" title="最小化" @click="minWin"><el-icon><Minus /></el-icon></button>
+        <button class="tb-btn" :title="isMaxed ? '还原' : '最大化'" @click="toggleMaxWin">
+          <el-icon><CopyDocument v-if="isMaxed" /><FullScreen v-else /></el-icon>
+        </button>
+        <button class="tb-btn danger" title="关闭" @click="closeWin"><el-icon><Close /></el-icon></button>
+      </div>
+    </div>
     <div class="topbar">
-      <h1>OpenRouter ImageGen UI</h1>
       <el-select
         v-model="selectedId"
         filterable
@@ -199,7 +209,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Close, Delete, Download, FolderOpened, Picture } from '@element-plus/icons-vue'
+import { Close, CopyDocument, Delete, Download, FolderOpened, FullScreen, Minus, Picture } from '@element-plus/icons-vue'
 import { listImageModels, listModelEndpoints, generateImages, generateImagesStream } from './api/openrouter'
 import { loadHistory, persistHistory } from './api/historyStore'
 import { buildParamFields, cleanParams, type ParamField } from './api/params'
@@ -228,6 +238,23 @@ const usageText = ref('')
 const currentImages = ref<GeneratedImage[]>([])
 const partialB64 = ref('')
 const history = ref<HistoryItem[]>([])
+
+// 自绘标题栏：macOS 左侧红绿灯，Win/Linux frameless 右置按钮
+const isMac = ref(window.electronAPI?.platform === 'darwin')
+const isFrameless = ref(!!window.electronAPI && window.electronAPI.platform !== 'darwin')
+const isMaxed = ref(false)
+function onTitleDblClick() {
+  if (isFrameless.value) window.electronAPI?.toggleMaximize?.()
+}
+function minWin() {
+  window.electronAPI?.minimize?.()
+}
+function toggleMaxWin() {
+  window.electronAPI?.toggleMaximize?.()
+}
+function closeWin() {
+  window.electronAPI?.close?.()
+}
 
 function filterModels(q: string) {
   modelQuery.value = q
@@ -531,6 +558,14 @@ function useAsReference(img: GeneratedImage) {
 
 onMounted(async () => {
   document.addEventListener('paste', handlePaste)
+  if (window.electronAPI?.isMaximized) {
+    try {
+      isMaxed.value = await window.electronAPI.isMaximized()
+    } catch { /* ignore */ }
+    window.electronAPI.onMaxState?.((v) => {
+      isMaxed.value = v
+    })
+  }
   try {
     history.value = await loadHistory()
   } catch {

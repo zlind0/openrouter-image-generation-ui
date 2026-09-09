@@ -1,10 +1,13 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron')
 const path = require('path')
 const fs = require('fs')
 
 let mainWindow = null
+const isMac = process.platform === 'darwin'
 
 function createWindow() {
+  // 去掉原生菜单（File/Edit/View... 很丑）
+  Menu.setApplicationMenu(null)
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -13,10 +16,13 @@ function createWindow() {
     title: 'OpenRouter ImageGen UI',
     icon: path.join(__dirname, '../build/icon.png'),
     backgroundColor: '#161c22',
-    // macOS：隐藏原生白色标题栏，红绿灯直接嵌进应用顶栏
-    ...(process.platform === 'darwin'
-      ? { titleBarStyle: 'hidden', trafficLightPosition: { x: 12, y: 19 } }
-      : {}),
+    autoHideMenuBar: true,
+    // macOS：保留红绿灯，隐藏原生白色标题栏，红绿灯嵌进自绘顶栏左侧
+    // Windows/Linux：frameless，右上角用自绘最小化/最大化/关闭
+    frame: isMac,
+    ...(isMac
+      ? { titleBarStyle: 'hidden', trafficLightPosition: { x: 12, y: 12 } }
+      : { titleBarStyle: 'hidden' }),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -35,7 +41,24 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+
+  // frameless 下同步最大化状态，给自绘按钮切换图标
+  const sendMaxState = () => {
+    if (mainWindow) mainWindow.webContents.send('window:max-state', mainWindow.isMaximized())
+  }
+  mainWindow.on('maximize', sendMaxState)
+  mainWindow.on('unmaximize', sendMaxState)
 }
+
+// 自绘标题栏按钮（仅 Windows/Linux frameless 用，macOS 用红绿灯）
+ipcMain.on('window:minimize', () => mainWindow?.minimize())
+ipcMain.on('window:toggle-maximize', () => {
+  if (!mainWindow) return
+  if (mainWindow.isMaximized()) mainWindow.unmaximize()
+  else mainWindow.maximize()
+})
+ipcMain.on('window:close', () => mainWindow?.close())
+ipcMain.handle('window:is-maximized', () => !!mainWindow?.isMaximized())
 
 app.whenReady().then(() => {
   createWindow()

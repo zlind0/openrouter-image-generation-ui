@@ -5,12 +5,18 @@ body { background: #0d1117; color: #e8edf2; }
 button, input, select, textarea { font: inherit; }
 .app { display: flex; flex-direction: column; height: 100vh; }
 
-/* 顶栏：承担 mac 隐藏标题栏后的拖窗口功能 */
-.topbar { display: flex; gap: 12px; align-items: center; padding: 10px 16px 10px 80px; border-bottom: 1px solid #26303a; background: #161c22; -webkit-app-region: drag; user-select: none; }
-.topbar h1 { font-size: 15px; margin: 0; white-space: nowrap; }
+/* 自绘标题栏：承担拖窗口功能，工具栏不再拖 */
+.titlebar { height: 36px; display: flex; align-items: center; background: #232f3b; -webkit-app-region: drag; user-select: none; flex: none; }
+.titlebar .tb-title { font-size: 13px; font-weight: 600; color: #d5dde4; padding-left: 12px; white-space: nowrap; }
+.titlebar.mac .tb-title { padding-left: 78px; }
+.titlebar .tb-btns { margin-left: auto; display: flex; align-items: stretch; -webkit-app-region: no-drag; }
+.titlebar .tb-btn { width: 46px; height: 36px; display: inline-flex; align-items: center; justify-content: center; border: 0; background: transparent; color: #aeb9c4; cursor: pointer; font-size: 15px; }
+.titlebar .tb-btn:hover { background: #2a343f; color: #fff; }
+.titlebar .tb-btn.danger:hover { background: #e81123; color: #fff; }
+
+/* 顶栏：纯工具条，Win/Mac 都不留白 */
+.topbar { display: flex; gap: 12px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #26303a; background: #161c22; user-select: none; }
 .topbar .spacer { flex: 1; }
-/* 可交互控件退出拖拽区，否则点不了 */
-.topbar .el-input, .topbar .el-select, .topbar .el-button { -webkit-app-region: no-drag; }
 .model-picker { width: 300px; }
 .key-input { width: 260px; }
 /* 模型下拉：双行紧凑选项（覆盖 el-option 默认 34px 单行高，否则两行内容会重叠） */
