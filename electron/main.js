@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, Menu, session, net } = require('electron')
 const path = require('path')
 const fs = require('fs')
 
@@ -60,6 +60,37 @@ ipcMain.on('window:toggle-maximize', () => {
 ipcMain.on('window:close', () => mainWindow?.close())
 ipcMain.handle('window:is-maximized', () => !!mainWindow?.isMaximized())
 
+// ---- 代理：renderer 的 fetch 走 Chromium 网络栈，session 级代理对其生效 ----
+let proxyAuth = { username: '', password: '' }
+app.on('login', (event, _webContents, _details, authInfo, callback) => {
+  if (authInfo.isProxy && proxyAuth.username) {
+    event.preventDefault()
+    callback(proxyAuth.username, proxyAuth.password)
+  }
+})
+
+function normalizeHostPort(url) {
+  return String(url || '')
+    .trim()
+    .replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '')
+    .replace(/\/+$/, '')
+}
+
+ipcMain.handle('proxy:set', async (_event, cfg) => {
+  const ses = session.defaultSession
+  proxyAuth = { username: (cfg && cfg.username) || '', password: (cfg && cfg.password) || '' }
+  if (!cfg || !cfg.enabled || !cfg.url || !cfg.url.trim()) {
+    await ses.setProxy({ mode: 'direct' })
+    return { ok: true, mode: 'direct' }
+  }
+  const hostport = normalizeHostPort(cfg.url)
+  if (!hostport || !hostport.includes(':')) throw new Error('代理地址无效，应为 host:port，可带 scheme')
+  const type = cfg.type === 'socks5' ? 'socks5' : cfg.type === 'https' ? 'https' : 'http'
+  const proxyRules = `${type}://${hostport}`
+  await ses.setProxy({ proxyRules, proxyBypassRules: '<local>' })
+  return { ok: true, proxyRules }
+})
+
 app.whenReady().then(() => {
   createWindow()
   app.on('activate', () => {
@@ -69,6 +100,22 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+// 经本机代理拉取图片 URL 转 dataURL：net 走 session 代理（含认证），
+// 预览与生成上传都用字节，不依赖 OpenRouter 服务端去抓 URL
+ipcMain.handle('image:fetch-url', async (_event, url) => {
+  const u = String(url || '').trim()
+  if (!/^https?:\/\//i.test(u)) throw new Error('仅支持 http(s) 图片 URL')
+  const res = await net.fetch(u, { signal: AbortSignal.timeout(30000) })
+  if (!res.ok) throw new Error(`拉图失败 (${res.status})`)
+  const ct = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
+  if (ct && !ct.startsWith('image/')) throw new Error(`URL 不是图片（${ct}）`)
+  const buf = Buffer.from(await res.arrayBuffer())
+  const MAX = 15 * 1024 * 1024
+  if (buf.length > MAX) throw new Error('图片超过 15MB，请压缩后重试')
+  const mime = ct.startsWith('image/') ? ct : 'image/png'
+  return { dataUrl: `data:${mime};base64,${buf.toString('base64')}`, contentType: mime }
 })
 
 // 选择参考图片（返回 dataURL 数组）

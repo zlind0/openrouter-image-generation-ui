@@ -5,7 +5,11 @@ import type {
   ImageModelListItem,
 } from './types'
 
-const BASE = 'https://openrouter.ai/api/v1'
+const DEFAULT_BASE = 'https://openrouter.ai/api/v1'
+
+function baseOf(baseUrl?: string): string {
+  return (baseUrl || DEFAULT_BASE).trim().replace(/\/+$/, '')
+}
 
 function headers(apiKey: string) {
   return {
@@ -24,17 +28,17 @@ function errMsg(data: unknown, fallback: string): string {
   return fallback
 }
 
-export async function listImageModels(apiKey: string): Promise<ImageModelListItem[]> {
-  const res = await fetch(`${BASE}/images/models`, { headers: headers(apiKey) })
+export async function listImageModels(apiKey: string, baseUrl?: string): Promise<ImageModelListItem[]> {
+  const res = await fetch(`${baseOf(baseUrl)}/images/models`, { headers: headers(apiKey) })
   const data = await res.json()
   if (!res.ok) throw new Error(errMsg(data, `获取模型列表失败 (${res.status})`))
   return (data.data ?? []) as ImageModelListItem[]
 }
 
-export async function listModelEndpoints(apiKey: string, modelId: string): Promise<ImageEndpoint[]> {
+export async function listModelEndpoints(apiKey: string, modelId: string, baseUrl?: string): Promise<ImageEndpoint[]> {
   const [author, ...rest] = modelId.split('/')
   const slug = rest.join('/')
-  const res = await fetch(`${BASE}/images/models/${author}/${slug}/endpoints`, {
+  const res = await fetch(`${baseOf(baseUrl)}/images/models/${author}/${slug}/endpoints`, {
     headers: headers(apiKey),
   })
   const data = await res.json()
@@ -42,8 +46,8 @@ export async function listModelEndpoints(apiKey: string, modelId: string): Promi
   return (data.endpoints ?? []) as ImageEndpoint[]
 }
 
-export async function generateImages(apiKey: string, body: GenerateRequest): Promise<GenerateResponse> {
-  const res = await fetch(`${BASE}/images`, {
+export async function generateImages(apiKey: string, body: GenerateRequest, baseUrl?: string): Promise<GenerateResponse> {
+  const res = await fetch(`${baseOf(baseUrl)}/images`, {
     method: 'POST',
     headers: headers(apiKey),
     body: JSON.stringify(body),
@@ -53,6 +57,22 @@ export async function generateImages(apiKey: string, body: GenerateRequest): Pro
   return data as GenerateResponse
 }
 
+export interface KeyInfo {
+  label: string
+  limit: number | null
+  limit_remaining: number | null
+  usage: number
+  usage_daily: number
+  is_free_tier: boolean
+}
+
+/** 查询 Key 额度（普通 Key 可用；limit_remaining 为 null 表示不限额） */
+export async function getKeyInfo(apiKey: string, baseUrl?: string): Promise<KeyInfo> {
+  const res = await fetch(`${baseOf(baseUrl)}/key`, { headers: headers(apiKey) })
+  const data = await res.json()
+  if (!res.ok) throw new Error(errMsg(data, `查询余额失败 (${res.status})`))
+  return data.data as KeyInfo
+}
 export interface StreamEvent {
   type: string
   b64_json?: string
@@ -69,8 +89,9 @@ export async function generateImagesStream(
   apiKey: string,
   body: GenerateRequest,
   onEvent: (e: StreamEvent) => void,
+  baseUrl?: string,
 ): Promise<void> {
-  const res = await fetch(`${BASE}/images`, {
+  const res = await fetch(`${baseOf(baseUrl)}/images`, {
     method: 'POST',
     headers: headers(apiKey),
     body: JSON.stringify({ ...body, stream: true }),

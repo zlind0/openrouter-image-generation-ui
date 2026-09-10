@@ -9,6 +9,16 @@ interface ElectronAPI {
   close?: () => void
   isMaximized?: () => Promise<boolean>
   onMaxState?: (cb: (maxed: boolean) => void) => void
+  setProxy?: (cfg: ProxyConfig) => Promise<{ ok: boolean; mode?: string; proxyRules?: string }>
+  fetchImageUrl?: (url: string) => Promise<{ dataUrl: string; contentType?: string }>
+}
+
+export interface ProxyConfig {
+  enabled: boolean
+  type: 'http' | 'https' | 'socks5'
+  url: string
+  username: string
+  password: string
 }
 
 declare global {

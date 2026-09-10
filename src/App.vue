@@ -27,17 +27,11 @@
           <div class="opt-id">{{ m.id }}</div>
         </el-option>
       </el-select>
-      <el-input
-        v-model="apiKey"
-        type="password"
-        show-password
-        placeholder="输入 OpenRouter API Key (sk-or-...)"
-        class="key-input"
-        @change="saveKey"
-      />
-      <el-button @click="saveKey">保存 Key</el-button>
+      <el-button :icon="Setting" @click="openSettings">设置</el-button>
       <el-button @click="loadModels" :loading="loadingModels" :disabled="!apiKey">刷新模型</el-button>
       <div class="spacer"></div>
+      <span class="balance" :title="balanceTip">{{ balanceText }}</span>
+      <el-button circle size="small" :icon="Refresh" title="刷新余额" @click="() => refreshBalance()" :loading="loadingBalance" />
       <span class="status">{{ statusText }}</span>
     </div>
 
@@ -203,21 +197,69 @@
         </el-card>
       </div>
     </div>
+
+    <!-- 设置：BaseURL / Key / 代理 -->
+    <el-dialog v-model="settingsOpen" title="设置" width="520px" :close-on-click-modal="false">
+      <el-form label-width="86px" label-position="left">
+        <el-form-item label="Base URL">
+          <el-input v-model="draftBaseUrl" placeholder="https://openrouter.ai/api/v1" clearable />
+        </el-form-item>
+        <el-form-item label="API Key">
+          <el-input v-model="draftKey" type="password" show-password placeholder="sk-or-..." clearable />
+        </el-form-item>
+        <el-divider>代理（仅 Electron 客户端生效）</el-divider>
+        <el-form-item label="启用代理">
+          <el-switch v-model="draftProxy.enabled" />
+        </el-form-item>
+        <el-form-item label="代理类型">
+          <el-select v-model="draftProxy.type" :disabled="!draftProxy.enabled" style="width: 100%">
+            <el-option label="HTTP" value="http" />
+            <el-option label="HTTPS" value="https" />
+            <el-option label="SOCKS5" value="socks5" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="代理地址">
+          <el-input v-model="draftProxy.url" :disabled="!draftProxy.enabled" placeholder="127.0.0.1:7890" clearable />
+        </el-form-item>
+        <el-form-item label="用户名">
+          <el-input v-model="draftProxy.username" :disabled="!draftProxy.enabled" placeholder="可选" clearable />
+        </el-form-item>
+        <el-form-item label="密码">
+          <el-input
+            v-model="draftProxy.password"
+            :disabled="!draftProxy.enabled"
+            type="password"
+            show-password
+            placeholder="可选"
+            clearable
+          />
+        </el-form-item>
+        <el-alert v-if="testResult" :title="testResult" type="success" show-icon :closable="false" />
+      </el-form>
+      <template #footer>
+        <el-button @click="testConnection" :loading="testing">测试连接</el-button>
+        <el-button @click="settingsOpen = false">取消</el-button>
+        <el-button type="primary" @click="saveSettingsDialog">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Close, CopyDocument, Delete, Download, FolderOpened, FullScreen, Minus, Picture } from '@element-plus/icons-vue'
-import { listImageModels, listModelEndpoints, generateImages, generateImagesStream } from './api/openrouter'
+import { Close, CopyDocument, Delete, Download, FolderOpened, FullScreen, Minus, Picture, Refresh, Setting } from '@element-plus/icons-vue'
+import { listImageModels, listModelEndpoints, generateImages, generateImagesStream, getKeyInfo } from './api/openrouter'
+import { loadSettings, saveSettings, loadLastModel, saveLastModel, DEFAULT_BASE_URL, type ProxySettings } from './api/settings'
 import { loadHistory, persistHistory } from './api/historyStore'
 import { buildParamFields, cleanParams, type ParamField } from './api/params'
 import type { GeneratedImage, HistoryItem, ImageEndpoint, ImageModelListItem, ReferenceImage } from './api/types'
 
-const LS_KEY = 'or-img-api-key'
+const stored = loadSettings()
 
-const apiKey = ref(localStorage.getItem(LS_KEY) || '')
+const apiKey = ref(stored.apiKey)
+const baseUrl = ref(stored.baseUrl || DEFAULT_BASE_URL)
+const proxyCfg = ref<ProxySettings>({ ...stored.proxy })
 const models = ref<ImageModelListItem[]>([])
 const endpoints = ref<ImageEndpoint[]>([])
 const modelQuery = ref('')
@@ -233,7 +275,10 @@ const loadingModels = ref(false)
 const generating = ref(false)
 const modelsError = ref('')
 const error = ref('')
-const statusText = ref('请先在顶部设置 API Key')
+const statusText = ref('请先打开设置配置 API Key')
+const balanceText = ref('余额：—')
+const balanceTip = ref('')
+const loadingBalance = ref(false)
 const usageText = ref('')
 const currentImages = ref<GeneratedImage[]>([])
 const partialB64 = ref('')
@@ -271,11 +316,96 @@ const canGenerate = computed(() => !!apiKey.value && !!selectedId.value && !!pro
 const refsPreview = computed(() => references.value.map((r) => r.dataUrl))
 const currentPreview = computed(() => currentImages.value.map(dataUrlOf))
 
-function saveKey() {
-  localStorage.setItem(LS_KEY, apiKey.value.trim())
-  apiKey.value = apiKey.value.trim()
-  statusText.value = apiKey.value ? 'Key 已保存' : '请先在顶部设置 API Key'
-  if (apiKey.value) ElMessage.success('API Key 已保存')
+/* ---- 设置：BaseURL / Key / 代理 ---- */
+const settingsOpen = ref(false)
+const draftBaseUrl = ref('')
+const draftKey = ref('')
+const draftProxy = ref<ProxySettings>({ enabled: false, type: 'http', url: '', username: '', password: '' })
+const testing = ref(false)
+const testResult = ref('')
+
+function openSettings() {
+  draftBaseUrl.value = baseUrl.value
+  draftKey.value = apiKey.value
+  draftProxy.value = { ...proxyCfg.value }
+  testResult.value = ''
+  settingsOpen.value = true
+}
+
+async function applyProxy() {
+  if (!window.electronAPI?.setProxy) return
+  try {
+    await window.electronAPI.setProxy({ ...proxyCfg.value })
+  } catch (e) {
+    ElMessage.error(`代理设置失败：${e instanceof Error ? e.message : String(e)}`)
+  }
+}
+
+async function testConnection() {
+  const key = draftKey.value.trim()
+  const url = (draftBaseUrl.value.trim() || DEFAULT_BASE_URL).replace(/\/+$/, '')
+  if (!key) {
+    ElMessage.warning('请先填写 API Key')
+    return
+  }
+  testing.value = true
+  testResult.value = ''
+  try {
+    // 测试即拉模型：通则可用模型数即结果
+    const list = await listImageModels(key, url)
+    testResult.value = `连接成功，可用图像模型 ${list.length} 个`
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e))
+  } finally {
+    testing.value = false
+  }
+}
+
+async function saveSettingsDialog() {
+  const key = draftKey.value.trim()
+  const url = (draftBaseUrl.value.trim() || DEFAULT_BASE_URL).replace(/\/+$/, '')
+  if (!key) {
+    ElMessage.warning('请填写 API Key')
+    return
+  }
+  if (draftProxy.value.enabled && !draftProxy.value.url.trim()) {
+    ElMessage.warning('已启用代理，请填写代理地址')
+    return
+  }
+  apiKey.value = key
+  baseUrl.value = url
+  proxyCfg.value = { ...draftProxy.value }
+  saveSettings({ baseUrl: url, apiKey: key, proxy: { ...proxyCfg.value } })
+  settingsOpen.value = false
+  ElMessage.success('设置已保存')
+  await applyProxy()
+  await loadModels()
+  await refreshBalance(true)
+}
+
+/* ---- 余额：打开 App / 生成完成后刷新，支持手动刷新 ---- */
+async function refreshBalance(silent = false) {
+  if (!apiKey.value) {
+    balanceText.value = '余额：—'
+    balanceTip.value = '请先在设置中配置 API Key'
+    return
+  }
+  loadingBalance.value = true
+  try {
+    const info = await getKeyInfo(apiKey.value, baseUrl.value)
+    if (info.limit_remaining == null) {
+      balanceText.value = `已用 $${info.usage.toFixed(2)}（不限额）`
+    } else {
+      balanceText.value = `剩余额度 $${info.limit_remaining.toFixed(2)}`
+    }
+    balanceTip.value = `${info.label || 'Key'} · 累计已用 $${info.usage.toFixed(2)} · 今日 $${info.usage_daily.toFixed(2)}`
+  } catch (e) {
+    balanceText.value = '余额获取失败'
+    balanceTip.value = e instanceof Error ? e.message : String(e)
+    if (!silent) ElMessage.error(balanceTip.value)
+  } finally {
+    loadingBalance.value = false
+  }
 }
 
 function minPrice(e: ImageEndpoint): string {
@@ -292,10 +422,15 @@ async function loadModels() {
   loadingModels.value = true
   modelsError.value = ''
   try {
-    models.value = await listImageModels(apiKey.value)
+    models.value = await listImageModels(apiKey.value, baseUrl.value)
     statusText.value = `已加载 ${models.value.length} 个图像模型`
     ElMessage.success(`已加载 ${models.value.length} 个图像模型`)
-    if (!selectedId.value && models.value.length) selectModel(models.value[0].id)
+    if (!selectedId.value && models.value.length) {
+      // 优先恢复上次选择过的模型（下拉选中即记），找不到了再回退第一个
+      const last = loadLastModel()
+      const hit = last && models.value.some((m) => m.id === last) ? last : models.value[0].id
+      selectModel(hit)
+    }
   } catch (e) {
     modelsError.value = e instanceof Error ? e.message : String(e)
     ElMessage.error(modelsError.value)
@@ -307,6 +442,7 @@ async function loadModels() {
 async function selectModel(id: string) {
   if (!id) return
   selectedId.value = id
+  saveLastModel(id)
   providerChoice.value = ''
   paramFields.value = []
   paramValues.value = {}
@@ -316,7 +452,7 @@ async function selectModel(id: string) {
   if (m) applyFields(m.supported_parameters)
   // 再拉端点级精确参数
   try {
-    const eps = await listModelEndpoints(apiKey.value, id)
+    const eps = await listModelEndpoints(apiKey.value, id, baseUrl.value)
     endpoints.value = eps
     const ep = eps[0]
     if (ep) applyFields(ep.supported_parameters)
@@ -369,8 +505,27 @@ async function pickFiles() {
 function addUrl() {
   const u = imageUrl.value.trim()
   if (!u) return
-  references.value.push({ name: u.slice(0, 40), dataUrl: u })
   imageUrl.value = ''
+  void addUrlAsync(u)
+}
+
+async function addUrlAsync(u: string) {
+  if (references.value.length >= 16) {
+    ElMessage.warning('参考图最多 16 张')
+    return
+  }
+  // Electron 下经主进程 net.fetch 拉图（走已配置代理），转 dataURL 后再预览/上传，
+  // 全程不依赖 OpenRouter 服务端去抓 URL；失败则保留原 URL（预览仍走 session 代理）
+  if (window.electronAPI?.fetchImageUrl && /^https?:\/\//i.test(u)) {
+    try {
+      const r = await window.electronAPI.fetchImageUrl(u)
+      references.value.push({ name: u.slice(0, 40), dataUrl: r.dataUrl })
+      return
+    } catch (e) {
+      ElMessage.warning(`代理拉图失败，已保留原 URL：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+  references.value.push({ name: u.slice(0, 40), dataUrl: u })
 }
 
 // 2 秒内同名同大小同时间戳的文件视为重复事件，去重
@@ -443,20 +598,22 @@ async function generate() {
           currentImages.value = [{ b64_json: ev.b64_json, media_type: ev.media_type }]
           if (ev.usage) usageText.value = `cost: $${ev.usage.cost ?? '?'} · tokens: ${ev.usage.total_tokens}`
           pushHistory({ images: currentImages.value, usage: ev.usage })
+          void refreshBalance(true)
         } else if (ev.type === 'error') {
           throw new Error(ev.error?.message || '流式生成失败')
         }
-      })
+      }, baseUrl.value)
       if (!currentImages.value.length && !error.value) {
         statusText.value = '流式无 completed 事件，可能端点不支持 stream'
       }
     } else {
-      const res = await generateImages(apiKey.value, body)
+      const res = await generateImages(apiKey.value, body, baseUrl.value)
       currentImages.value = res.data
       if (res.usage) usageText.value = `cost: $${res.usage.cost ?? '?'} · tokens: ${res.usage.total_tokens}`
       pushHistory({ images: res.data, usage: res.usage })
       statusText.value = `生成完成：${res.data.length} 张`
       ElMessage.success(`生成完成：${res.data.length} 张`)
+      void refreshBalance(true)
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -580,7 +737,12 @@ onMounted(async () => {
     }
     localStorage.removeItem('or-img-history')
   } catch { /* ignore */ }
-  if (apiKey.value) loadModels()
+  // 启动即应用已存代理，再拉模型 + 刷余额
+  await applyProxy()
+  if (apiKey.value) {
+    loadModels()
+    void refreshBalance(true)
+  }
 })
 
 onUnmounted(() => {
