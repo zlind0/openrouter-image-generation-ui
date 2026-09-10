@@ -1,7 +1,7 @@
 <template>
   <div class="app">
     <!-- 自绘标题栏：Win/Linux frameless 右置原生按钮替代，macOS 左侧给红绿灯留位 -->
-    <div class="titlebar" :class="{ mac: isMac }" @dblclick="onTitleDblClick">
+    <div class="titlebar" :class="{ mac: isMac }" data-tauri-drag-region @dblclick="onTitleDblClick">
       <div class="tb-title">OpenRouter ImageGen UI</div>
       <div class="tb-btns" v-if="isFrameless">
         <button class="tb-btn" title="最小化" @click="minWin"><el-icon><Minus /></el-icon></button>
@@ -207,7 +207,7 @@
         <el-form-item label="API Key">
           <el-input v-model="draftKey" type="password" show-password placeholder="sk-or-..." clearable />
         </el-form-item>
-        <el-divider>代理（仅 Electron 客户端生效）</el-divider>
+        <el-divider>代理（浏览器预览时不生效）</el-divider>
         <el-form-item label="启用代理">
           <el-switch v-model="draftProxy.enabled" @change="onProxyToggle" />
         </el-form-item>
@@ -250,6 +250,18 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Close, CopyDocument, Delete, Download, FolderOpened, FullScreen, Minus, Picture, Refresh, Setting } from '@element-plus/icons-vue'
 import { listImageModels, listModelEndpoints, generateImages, generateImagesStream, getKeyInfo } from './api/openrouter'
+import { isTauri } from '@tauri-apps/api/core'
+import {
+  isMacOS,
+  pickImages as nativePickImages,
+  saveImage as nativeSaveImage,
+  fetchImageDataUrl,
+  minimizeWin as nativeMinimize,
+  toggleMaxWin as nativeToggleMax,
+  closeWin as nativeClose,
+  getMaxed,
+  onMaxState,
+} from './api/native'
 import { loadSettings, saveSettings, loadLastModel, saveLastModel, DEFAULT_BASE_URL, DEFAULT_PROXY_URL, type ProxySettings } from './api/settings'
 import { loadHistory, persistHistory } from './api/historyStore'
 import { buildParamFields, cleanParams, type ParamField } from './api/params'
@@ -284,21 +296,30 @@ const currentImages = ref<GeneratedImage[]>([])
 const partialB64 = ref('')
 const history = ref<HistoryItem[]>([])
 
-// 自绘标题栏：macOS 左侧红绿灯，Win/Linux frameless 右置按钮
-const isMac = ref(window.electronAPI?.platform === 'darwin')
-const isFrameless = ref(!!window.electronAPI && window.electronAPI.platform !== 'darwin')
+// 自绘标题栏：macOS 左侧红绿灯，Win/Linux 无边框右置按钮（Tauri 下 data-tauri-drag-region 拖拽）
+const isMac = ref(isMacOS())
+const isFrameless = ref(isTauri() && !isMacOS())
 const isMaxed = ref(false)
 function onTitleDblClick() {
-  if (isFrameless.value) window.electronAPI?.toggleMaximize?.()
+  if (isFrameless.value) toggleMaxWin()
+}
+function syncMaxed() {
+  getMaxed()
+    .then((v) => {
+      isMaxed.value = v
+    })
+    .catch(() => {})
 }
 function minWin() {
-  window.electronAPI?.minimize?.()
+  void nativeMinimize()
 }
 function toggleMaxWin() {
-  window.electronAPI?.toggleMaximize?.()
+  nativeToggleMax()
+    .then(syncMaxed)
+    .catch(() => {})
 }
 function closeWin() {
-  window.electronAPI?.close?.()
+  void nativeClose()
 }
 
 function filterModels(q: string) {
@@ -340,15 +361,6 @@ function onProxyToggle() {
   }
 }
 
-async function applyProxy() {
-  if (!window.electronAPI?.setProxy) return
-  try {
-    await window.electronAPI.setProxy({ ...proxyCfg.value })
-  } catch (e) {
-    ElMessage.error(`代理设置失败：${e instanceof Error ? e.message : String(e)}`)
-  }
-}
-
 async function testConnection() {
   const key = draftKey.value.trim()
   const url = (draftBaseUrl.value.trim() || DEFAULT_BASE_URL).replace(/\/+$/, '')
@@ -360,34 +372,20 @@ async function testConnection() {
     ElMessage.warning('已启用代理，请填写代理地址')
     return
   }
-  const inElectron = !!window.electronAPI?.setProxy
-  if (!inElectron && draftProxy.value.enabled) {
-    ElMessage.warning('代理仅 Electron 客户端生效，本次测试走直连')
+  const inTauri = isTauri()
+  if (!inTauri && draftProxy.value.enabled) {
+    ElMessage.warning('浏览器预览时代理不生效，本次测试走直连')
   }
   testing.value = true
   testResult.value = ''
-  // 先临时应用界面上的草稿代理再测，测完恢复已保存的代理，保证测的就是当前填的值
-  if (inElectron) {
-    try {
-      await window.electronAPI?.setProxy?.({ ...draftProxy.value })
-    } catch (e) {
-      testing.value = false
-      ElMessage.error(`代理应用失败：${e instanceof Error ? e.message : String(e)}`)
-      return
-    }
-  }
+  // 代理随调用传入，测的就是界面上当前填的值，无需临时切换
   try {
     // 测试即拉模型：通则可用模型数即结果
-    const list = await listImageModels(key, url)
+    const list = await listImageModels(key, url, { ...draftProxy.value })
     testResult.value = `连接成功，可用图像模型 ${list.length} 个`
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : String(e))
   } finally {
-    if (inElectron) {
-      try {
-        await window.electronAPI?.setProxy?.({ ...proxyCfg.value })
-      } catch { /* 恢复失败不打扰，下次保存/启动会重应用 */ }
-    }
     testing.value = false
   }
 }
@@ -409,7 +407,6 @@ async function saveSettingsDialog() {
   saveSettings({ baseUrl: url, apiKey: key, proxy: { ...proxyCfg.value } })
   settingsOpen.value = false
   ElMessage.success('设置已保存')
-  await applyProxy()
   await loadModels()
   await refreshBalance(true)
 }
@@ -423,7 +420,7 @@ async function refreshBalance(silent = false) {
   }
   loadingBalance.value = true
   try {
-    const info = await getKeyInfo(apiKey.value, baseUrl.value)
+    const info = await getKeyInfo(apiKey.value, baseUrl.value, proxyCfg.value)
     if (info.limit_remaining == null) {
       balanceText.value = `已用 $${info.usage.toFixed(2)}（不限额）`
     } else {
@@ -453,7 +450,7 @@ async function loadModels() {
   loadingModels.value = true
   modelsError.value = ''
   try {
-    models.value = await listImageModels(apiKey.value, baseUrl.value)
+    models.value = await listImageModels(apiKey.value, baseUrl.value, proxyCfg.value)
     statusText.value = `已加载 ${models.value.length} 个图像模型`
     ElMessage.success(`已加载 ${models.value.length} 个图像模型`)
     if (!selectedId.value && models.value.length) {
@@ -483,7 +480,7 @@ async function selectModel(id: string) {
   if (m) applyFields(m.supported_parameters)
   // 再拉端点级精确参数
   try {
-    const eps = await listModelEndpoints(apiKey.value, id, baseUrl.value)
+    const eps = await listModelEndpoints(apiKey.value, id, baseUrl.value, proxyCfg.value)
     endpoints.value = eps
     const ep = eps[0]
     if (ep) applyFields(ep.supported_parameters)
@@ -517,20 +514,9 @@ function dataUrlOf(img: GeneratedImage): string {
 
 // ---- 参考图：文件选择 / 拖拽 / 剪贴板粘贴（单一 document 监听，避免重复） ----
 async function pickFiles() {
-  if (window.electronAPI) {
-    const pics = await window.electronAPI.pickImages()
-    references.value.push(...pics.slice(0, 16 - references.value.length))
-    return
-  }
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = 'image/*'
-  input.multiple = true
-  input.onchange = () => {
-    if (!input.files) return
-    filesToRefs(Array.from(input.files))
-  }
-  input.click()
+  // Tauri 原生对话框 / 浏览器 input 都在 native 内处理
+  const pics = await nativePickImages()
+  references.value.push(...pics.slice(0, 16 - references.value.length))
 }
 
 function addUrl() {
@@ -545,12 +531,12 @@ async function addUrlAsync(u: string) {
     ElMessage.warning('参考图最多 16 张')
     return
   }
-  // Electron 下经主进程 net.fetch 拉图（走已配置代理），转 dataURL 后再预览/上传，
-  // 全程不依赖 OpenRouter 服务端去抓 URL；失败则保留原 URL（预览仍走 session 代理）
-  if (window.electronAPI?.fetchImageUrl && /^https?:\/\//i.test(u)) {
+  // 经 Rust 拉图（走已配置代理）转 dataURL 后再预览/上传，
+  // 全程不依赖 OpenRouter 服务端去抓 URL；失败则保留原 URL
+  if (/^https?:\/\//i.test(u)) {
     try {
-      const r = await window.electronAPI.fetchImageUrl(u)
-      references.value.push({ name: u.slice(0, 40), dataUrl: r.dataUrl })
+      const dataUrl = await fetchImageDataUrl(u, proxyCfg.value)
+      references.value.push({ name: u.slice(0, 40), dataUrl })
       return
     } catch (e) {
       ElMessage.warning(`代理拉图失败，已保留原 URL：${e instanceof Error ? e.message : String(e)}`)
@@ -633,12 +619,12 @@ async function generate() {
         } else if (ev.type === 'error') {
           throw new Error(ev.error?.message || '流式生成失败')
         }
-      }, baseUrl.value)
+      }, baseUrl.value, proxyCfg.value)
       if (!currentImages.value.length && !error.value) {
         statusText.value = '流式无 completed 事件，可能端点不支持 stream'
       }
     } else {
-      const res = await generateImages(apiKey.value, body, baseUrl.value)
+      const res = await generateImages(apiKey.value, body, baseUrl.value, proxyCfg.value)
       currentImages.value = res.data
       if (res.usage) usageText.value = `cost: $${res.usage.cost ?? '?'} · tokens: ${res.usage.total_tokens}`
       pushHistory({ images: res.data, usage: res.usage })
@@ -721,22 +707,16 @@ function clearResults() {
 
 async function saveImage(img: GeneratedImage, i: number) {
   const b64 = img.b64_json.startsWith('data:') ? img.b64_json.split(',')[1] : img.b64_json
-  if (window.electronAPI) {
-    const r = await window.electronAPI.saveImage({
-      b64,
-      mediaType: img.media_type,
-      suggestedName: `or-${selectedId.value.replace('/', '-')}-${Date.now()}-${i}.png`,
-    })
-    if (r.saved) {
-      statusText.value = `已保存：${r.path}`
-      ElMessage.success(`已保存：${r.path}`)
-    }
-    return
+  // Tauri 原生另存为 / 浏览器 a[download] 都在 native 内处理
+  const r = await nativeSaveImage({
+    b64,
+    mediaType: img.media_type,
+    suggestedName: `or-${selectedId.value.replace('/', '-')}-${Date.now()}-${i}.png`,
+  })
+  if (r.saved) {
+    statusText.value = `已保存：${r.path}`
+    ElMessage.success(`已保存：${r.path}`)
   }
-  const a = document.createElement('a')
-  a.href = dataUrlOf(img)
-  a.download = `or-image-${Date.now()}-${i}.png`
-  a.click()
 }
 
 function useAsReference(img: GeneratedImage) {
@@ -746,14 +726,11 @@ function useAsReference(img: GeneratedImage) {
 
 onMounted(async () => {
   document.addEventListener('paste', handlePaste)
-  if (window.electronAPI?.isMaximized) {
-    try {
-      isMaxed.value = await window.electronAPI.isMaximized()
-    } catch { /* ignore */ }
-    window.electronAPI.onMaxState?.((v) => {
-      isMaxed.value = v
-    })
-  }
+  // frameless 下同步最大化状态（Rust 在 resize 时推送事件）
+  onMaxState((v) => {
+    isMaxed.value = v
+  })
+  syncMaxed()
   try {
     history.value = await loadHistory()
   } catch {
@@ -768,8 +745,7 @@ onMounted(async () => {
     }
     localStorage.removeItem('or-img-history')
   } catch { /* ignore */ }
-  // 启动即应用已存代理，再拉模型 + 刷余额
-  await applyProxy()
+  // 打开 App 即拉模型 + 刷余额（代理随每次 Rust 调用传入，无需预应用）
   if (apiKey.value) {
     loadModels()
     void refreshBalance(true)

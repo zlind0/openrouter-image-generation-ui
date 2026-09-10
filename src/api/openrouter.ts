@@ -1,9 +1,12 @@
+import { invoke, Channel, isTauri } from '@tauri-apps/api/core'
 import type {
   GenerateRequest,
   GenerateResponse,
   ImageEndpoint,
   ImageModelListItem,
 } from './types'
+import type { ProxySettings } from './settings'
+import { proxyWire } from './native'
 
 const DEFAULT_BASE = 'https://openrouter.ai/api/v1'
 
@@ -28,14 +31,40 @@ function errMsg(data: unknown, fallback: string): string {
   return fallback
 }
 
-export async function listImageModels(apiKey: string, baseUrl?: string): Promise<ImageModelListItem[]> {
+export async function listImageModels(
+  apiKey: string,
+  baseUrl?: string,
+  proxy?: ProxySettings | null,
+): Promise<ImageModelListItem[]> {
+  if (isTauri()) {
+    const data = await invoke<{ data?: ImageModelListItem[] }>('or_models', {
+      apiKey,
+      baseUrl: baseOf(baseUrl),
+      proxy: proxyWire(proxy),
+    })
+    return data?.data ?? []
+  }
   const res = await fetch(`${baseOf(baseUrl)}/images/models`, { headers: headers(apiKey) })
   const data = await res.json()
   if (!res.ok) throw new Error(errMsg(data, `获取模型列表失败 (${res.status})`))
   return (data.data ?? []) as ImageModelListItem[]
 }
 
-export async function listModelEndpoints(apiKey: string, modelId: string, baseUrl?: string): Promise<ImageEndpoint[]> {
+export async function listModelEndpoints(
+  apiKey: string,
+  modelId: string,
+  baseUrl?: string,
+  proxy?: ProxySettings | null,
+): Promise<ImageEndpoint[]> {
+  if (isTauri()) {
+    const data = await invoke<{ endpoints?: ImageEndpoint[] }>('or_endpoints', {
+      apiKey,
+      baseUrl: baseOf(baseUrl),
+      modelId,
+      proxy: proxyWire(proxy),
+    })
+    return data?.endpoints ?? []
+  }
   const [author, ...rest] = modelId.split('/')
   const slug = rest.join('/')
   const res = await fetch(`${baseOf(baseUrl)}/images/models/${author}/${slug}/endpoints`, {
@@ -46,7 +75,20 @@ export async function listModelEndpoints(apiKey: string, modelId: string, baseUr
   return (data.endpoints ?? []) as ImageEndpoint[]
 }
 
-export async function generateImages(apiKey: string, body: GenerateRequest, baseUrl?: string): Promise<GenerateResponse> {
+export async function generateImages(
+  apiKey: string,
+  body: GenerateRequest,
+  baseUrl?: string,
+  proxy?: ProxySettings | null,
+): Promise<GenerateResponse> {
+  if (isTauri()) {
+    return invoke<GenerateResponse>('or_generate', {
+      apiKey,
+      baseUrl: baseOf(baseUrl),
+      body,
+      proxy: proxyWire(proxy),
+    })
+  }
   const res = await fetch(`${baseOf(baseUrl)}/images`, {
     method: 'POST',
     headers: headers(apiKey),
@@ -67,12 +109,25 @@ export interface KeyInfo {
 }
 
 /** 查询 Key 额度（普通 Key 可用；limit_remaining 为 null 表示不限额） */
-export async function getKeyInfo(apiKey: string, baseUrl?: string): Promise<KeyInfo> {
+export async function getKeyInfo(
+  apiKey: string,
+  baseUrl?: string,
+  proxy?: ProxySettings | null,
+): Promise<KeyInfo> {
+  if (isTauri()) {
+    const data = await invoke<{ data: KeyInfo }>('or_key_info', {
+      apiKey,
+      baseUrl: baseOf(baseUrl),
+      proxy: proxyWire(proxy),
+    })
+    return data.data as KeyInfo
+  }
   const res = await fetch(`${baseOf(baseUrl)}/key`, { headers: headers(apiKey) })
   const data = await res.json()
   if (!res.ok) throw new Error(errMsg(data, `查询余额失败 (${res.status})`))
   return data.data as KeyInfo
 }
+
 export interface StreamEvent {
   type: string
   b64_json?: string
@@ -90,7 +145,20 @@ export async function generateImagesStream(
   body: GenerateRequest,
   onEvent: (e: StreamEvent) => void,
   baseUrl?: string,
+  proxy?: ProxySettings | null,
 ): Promise<void> {
+  if (isTauri()) {
+    const channel = new Channel<StreamEvent>()
+    channel.onmessage = onEvent
+    await invoke('or_generate_stream', {
+      apiKey,
+      baseUrl: baseOf(baseUrl),
+      body,
+      proxy: proxyWire(proxy),
+      onEvent: channel,
+    })
+    return
+  }
   const res = await fetch(`${baseOf(baseUrl)}/images`, {
     method: 'POST',
     headers: headers(apiKey),
@@ -123,3 +191,5 @@ export async function generateImagesStream(
     }
   }
 }
+
+export { isTauri }

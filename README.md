@@ -1,20 +1,23 @@
 # OpenRouter 图像生成客户端
 
-Electron + Vue 3 + Vite 实现的 OpenRouter Image API 客户端。
+Tauri + Vue 3 + Vite 实现的 OpenRouter Image API 客户端。
 
 API 依据：`GET /api/v1/images/models`、`GET /api/v1/images/models/{author}/{slug}/endpoints`、`POST /api/v1/images`（支持 `stream: true` SSE）。
+
+网络请求全部经 Rust（reqwest）发送，支持 http/https/socks5 代理（含认证），对模型/生成/余额/参考图拉取全量生效。
 
 ## 开发
 
 ```bash
 npm install
-npm run electron:dev   # Vite(5173) + Electron 联调
+npm run app:dev   # Tauri 窗口 + Vite(5173) 联调
+npm run dev       # 纯浏览器预览（代理不生效）
 ```
 
 ## 构建
 
 ```bash
-npm run build
+npm run build   # tauri build 打安装包
 ```
 
 ## 功能
