@@ -454,7 +454,9 @@ fn main() {
             let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("OpenRouter ImageGen UI")
                 .inner_size(1280.0, 860.0)
-                .min_inner_size(1024.0, 700.0);
+                .min_inner_size(1024.0, 700.0)
+                // 关掉 Tauri 的文件拖放拦截，否则 Windows 上 HTML5 drop 拿不到文件
+                .disable_drag_drop_handler();
             // macOS：保留红绿灯 + 隐藏标题栏；Win/Linux：无边框，自绘右置按钮
             #[cfg(target_os = "macos")]
             let builder = builder

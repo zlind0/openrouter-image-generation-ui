@@ -548,9 +548,18 @@ async function addUrlAsync(u: string) {
 // 2 秒内同名同大小同时间戳的文件视为重复事件，去重
 const recentFiles = new Set<string>()
 
-function filesToRefs(files: FileList | File[]) {
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif|bmp|svg)$/i
+
+/** 从资源管理器拖入时浏览器常给空 MIME（type === ''），用扩展名兜底判断 */
+function isImageFile(f: File): boolean {
+  if (f.type && f.type.startsWith('image/')) return true
+  return IMAGE_EXT.test(f.name)
+}
+
+function filesToRefs(files: FileList | File[]): number {
+  let added = 0
   for (const f of Array.from(files).slice(0, 16 - references.value.length)) {
-    if (!f.type.startsWith('image/')) continue
+    if (!isImageFile(f)) continue
     const key = `${f.name}|${f.size}|${f.lastModified}`
     if (recentFiles.has(key)) continue
     recentFiles.add(key)
@@ -558,11 +567,21 @@ function filesToRefs(files: FileList | File[]) {
     const rd = new FileReader()
     rd.onload = () => references.value.push({ name: f.name, dataUrl: String(rd.result) })
     rd.readAsDataURL(f)
+    added++
   }
+  return added
 }
 
 function onDrop(e: DragEvent) {
-  if (e.dataTransfer?.files?.length) filesToRefs(e.dataTransfer.files)
+  const files = e.dataTransfer?.files
+  if (!files?.length) return
+  if (references.value.length >= 16) {
+    ElMessage.warning('参考图最多 16 张')
+    return
+  }
+  if (!filesToRefs(files)) {
+    ElMessage.warning('未识别到图片文件（仅支持 png/jpg/webp/gif/bmp/svg）')
+  }
 }
 
 /** 全局唯一粘贴入口：有图片才拦截，无图片放行（保证文本正常粘贴）。 */
