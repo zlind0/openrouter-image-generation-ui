@@ -16,6 +16,7 @@ export interface AppSettings {
 }
 
 export const DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1'
+export const DEFAULT_PROXY_URL = '127.0.0.1:7890'
 const LS_SETTINGS = 'or-img-settings'
 const LS_LEGACY_KEY = 'or-img-api-key'
 
@@ -23,7 +24,7 @@ export function defaultSettings(): AppSettings {
   return {
     baseUrl: DEFAULT_BASE_URL,
     apiKey: '',
-    proxy: { enabled: false, type: 'http', url: '', username: '', password: '' },
+    proxy: { enabled: false, type: 'http', url: DEFAULT_PROXY_URL, username: '', password: '' },
   }
 }
 

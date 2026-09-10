@@ -209,7 +209,7 @@
         </el-form-item>
         <el-divider>代理（仅 Electron 客户端生效）</el-divider>
         <el-form-item label="启用代理">
-          <el-switch v-model="draftProxy.enabled" />
+          <el-switch v-model="draftProxy.enabled" @change="onProxyToggle" />
         </el-form-item>
         <el-form-item label="代理类型">
           <el-select v-model="draftProxy.type" :disabled="!draftProxy.enabled" style="width: 100%">
@@ -250,7 +250,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Close, CopyDocument, Delete, Download, FolderOpened, FullScreen, Minus, Picture, Refresh, Setting } from '@element-plus/icons-vue'
 import { listImageModels, listModelEndpoints, generateImages, generateImagesStream, getKeyInfo } from './api/openrouter'
-import { loadSettings, saveSettings, loadLastModel, saveLastModel, DEFAULT_BASE_URL, type ProxySettings } from './api/settings'
+import { loadSettings, saveSettings, loadLastModel, saveLastModel, DEFAULT_BASE_URL, DEFAULT_PROXY_URL, type ProxySettings } from './api/settings'
 import { loadHistory, persistHistory } from './api/historyStore'
 import { buildParamFields, cleanParams, type ParamField } from './api/params'
 import type { GeneratedImage, HistoryItem, ImageEndpoint, ImageModelListItem, ReferenceImage } from './api/types'
@@ -328,8 +328,16 @@ function openSettings() {
   draftBaseUrl.value = baseUrl.value
   draftKey.value = apiKey.value
   draftProxy.value = { ...proxyCfg.value }
+  // 老配置里地址可能是空的，打开即补默认，不用手打
+  if (!draftProxy.value.url.trim()) draftProxy.value.url = DEFAULT_PROXY_URL
   testResult.value = ''
   settingsOpen.value = true
+}
+
+function onProxyToggle() {
+  if (draftProxy.value.enabled && !draftProxy.value.url.trim()) {
+    draftProxy.value.url = DEFAULT_PROXY_URL
+  }
 }
 
 async function applyProxy() {
@@ -348,8 +356,26 @@ async function testConnection() {
     ElMessage.warning('请先填写 API Key')
     return
   }
+  if (draftProxy.value.enabled && !draftProxy.value.url.trim()) {
+    ElMessage.warning('已启用代理，请填写代理地址')
+    return
+  }
+  const inElectron = !!window.electronAPI?.setProxy
+  if (!inElectron && draftProxy.value.enabled) {
+    ElMessage.warning('代理仅 Electron 客户端生效，本次测试走直连')
+  }
   testing.value = true
   testResult.value = ''
+  // 先临时应用界面上的草稿代理再测，测完恢复已保存的代理，保证测的就是当前填的值
+  if (inElectron) {
+    try {
+      await window.electronAPI?.setProxy?.({ ...draftProxy.value })
+    } catch (e) {
+      testing.value = false
+      ElMessage.error(`代理应用失败：${e instanceof Error ? e.message : String(e)}`)
+      return
+    }
+  }
   try {
     // 测试即拉模型：通则可用模型数即结果
     const list = await listImageModels(key, url)
@@ -357,6 +383,11 @@ async function testConnection() {
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : String(e))
   } finally {
+    if (inElectron) {
+      try {
+        await window.electronAPI?.setProxy?.({ ...proxyCfg.value })
+      } catch { /* 恢复失败不打扰，下次保存/启动会重应用 */ }
+    }
     testing.value = false
   }
 }
