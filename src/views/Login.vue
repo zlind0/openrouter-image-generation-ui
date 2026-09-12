@@ -1,6 +1,6 @@
 <template>
   <div class="login-card">
-    <div class="login-icon">OR</div>
+    <img class="login-icon" src="/icon.png" alt="logo" />
     <h2>OR Image Web</h2>
     <el-form @submit.prevent="doLogin">
       <el-form-item label="用户名"><el-input v-model="u" /></el-form-item>

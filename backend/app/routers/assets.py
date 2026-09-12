@@ -1,5 +1,6 @@
 """素材库：文件夹树 + 按文件夹上传 + tag + EXIF/尺寸筛选 + AVIF 兼容。"""
 import base64
+import json
 import os
 import uuid
 
@@ -251,6 +252,7 @@ async def upload(
     folder_id: str | None = Form(None),
     folder_path: str | None = Form(None),
     tags: str = Form(""),
+    relpaths: str = Form(""),
     request: Request = None,  # noqa
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -262,13 +264,31 @@ async def upload(
         fid = _ensure_folder(db, folder_path, user)
     if not fid:
         fid = ensure_default_folder(db).id
+    # 拖放/目录上传的逐文件相对路径（与 files 一一对应，如 "旅拍/a.jpg"），
+    # 含子目录时在目标文件夹下按子树建文件夹
+    try:
+        rel_list = json.loads(relpaths) if relpaths else []
+        if not isinstance(rel_list, list):
+            rel_list = []
+    except Exception:
+        rel_list = []
+    base_path = ""
+    if fid:
+        bf = db.get(Folder, fid)
+        base_path = bf.path if bf else ""
     tag_list = [t for t in (tags or "").split(",") if t.strip()]
     saved, skipped = [], []
-    for f in files:
+    for i, f in enumerate(files):
         raw = await f.read()
         name = f.filename or "unnamed"
+        target = fid
+        rel = rel_list[i] if i < len(rel_list) and isinstance(rel_list[i], str) else ""
+        if rel and "/" in rel:
+            d = rel.rsplit("/", 1)[0]
+            full = f"{base_path}/{d}" if base_path else d
+            target = _ensure_folder(db, full, user)
         try:
-            a = _save_asset_file(db, user, name, raw, fid, tag_list)
+            a = _save_asset_file(db, user, name, raw, target, tag_list)
             saved.append(_asset_out(db, a))
         except SkippedFile as e:
             # 单文件上传：直接报错让用户知道；批量上传：跳过该文件继续

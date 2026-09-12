@@ -1,7 +1,7 @@
 <template>
   <div class="app">
     <div class="topbar" v-if="authed">
-      <div class="brand"><span class="app-icon">OR</span><strong>OR Image Web</strong></div>
+      <div class="brand"><img class="app-icon" src="/icon.png" alt="logo" /><strong>OR Image Web</strong></div>
       <nav>
         <router-link to="/generate">图片生成</router-link>
         <router-link to="/library">素材管理</router-link>

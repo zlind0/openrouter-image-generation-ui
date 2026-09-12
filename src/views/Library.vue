@@ -3,16 +3,18 @@
     <div class="left">
       <h2>素材管理</h2>
       <div class="row"><h3>文件夹</h3><el-button size="small" @click="openFolderDialog('')">新建</el-button></div>
-      <!-- 资源管理器式文件夹树：图标 + 三角 + 计数 + 右键菜单 -->
+      <!-- 资源管理器式文件夹树：图标 + 三角 + 计数 + 右键菜单，支持直接投放文件 -->
       <div class="explorer">
-        <div class="exp-row" :class="{active: !folderFilter}" @click="folderFilter='';load()" title="全部文件">
+        <div class="exp-row" :class="{active: !folderFilter, 'drop-hl': dropTarget==='__all__'}" @click="folderFilter='';load()" title="全部文件（可直接拖入文件上传到默认库）"
+             @dragover.prevent="dropTarget='__all__'" @dragleave="dropTarget=''" @drop.prevent="(e) => onDropTo(e, '')">
           <span class="exp-caret"></span>
           <el-icon class="exp-folder exp-all-icon"><Files /></el-icon>
           <span class="exp-name">全部文件</span>
         </div>
-        <div v-for="n in flatFolders" :key="n.id" class="exp-row" :class="{active: folderFilter===n.id}"
+        <div v-for="n in flatFolders" :key="n.id" class="exp-row" :class="{active: folderFilter===n.id, 'drop-hl': dropTarget===n.id}"
              :style="{paddingLeft: (8 + n.depth*18)+'px'}"
-             @click="selectFolder(n)" @contextmenu.prevent="openMenu($event, n)" title="右键：新建 / 重命名 / 删除">
+             @click="selectFolder(n)" @contextmenu.prevent="openMenu($event, n)" :title="`右键：新建 / 重命名 / 删除；拖入文件上传到「${n.path}」`"
+             @dragover.prevent="dropTarget=n.id" @dragleave="dropTarget=''" @drop.prevent="(e) => onDropTo(e, n.id)">
           <span class="exp-caret" @click.stop="toggleExpand(n)">
             <el-icon v-if="n.hasChildren"><CaretBottom v-if="!collapsed.has(n.id)" /><CaretRight v-else /></el-icon>
           </span>
@@ -33,9 +35,15 @@
       <el-button size="small" @click="fileInput?.click()">上传文件</el-button>
       <el-button size="small" @click="dirInput?.click()">按文件夹上传</el-button>
       <el-input v-model="uploadTags" placeholder="标签，逗号分隔" style="margin-top:8px" />
-      <p class="hint">未选文件夹时默认进入「上传素材」库。按文件夹上传会按相对路径自动建树。支持 AVIF/HEIC，旧浏览器由服务端自动转 JPEG 兜底。</p>
+      <p class="hint">拖放文件 / 文件夹到右侧，直接上传到当前选中的文件夹{{ selectedFolderName ? `「${selectedFolderName}」` : '（未选则进入「上传素材」库）' }}；也可拖到左侧某个文件夹上精准投放。按文件夹上传会按相对路径自动建树。支持 AVIF/HEIC，旧浏览器由服务端自动转 JPEG 兜底。</p>
     </div>
-    <div class="right">
+    <div class="right" @dragover.prevent="onDragOver" @dragleave="onDragLeave" @drop.prevent="onDropPanel">
+      <div v-if="dragActive" class="drop-mask">
+        <div class="drop-mask-inner">
+          <div class="drop-mask-title">松开以上传 {{ dropFilesHint }}</div>
+          <div class="drop-mask-sub">目标：{{ selectedFolderName ? `「${selectedFolderName}」` : '「上传素材」库（未选中文件夹）' }}</div>
+        </div>
+      </div>
       <div class="filters">
         <el-input v-model="q" placeholder="文件名搜索" clearable style="width:180px" @change="load" />
         <el-input v-model="tags" placeholder="标签 a,b" clearable style="width:180px" @change="load" />
@@ -118,7 +126,7 @@
   </div>
 </template>
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CaretBottom, CaretRight, Delete, Edit, Files, Folder, FolderOpened, Plus, PriceTag, Rank, Share } from '@element-plus/icons-vue'
 import { api, getFileToken } from '../api/client'
@@ -252,34 +260,107 @@ async function load() {
   if (uploader.value) p.uploader = uploader.value
   assets.value = (await api.get('/api/assets', { params: p })).data
 }
-async function doUpload(files: FileList, folderPath = '') {
+interface DropEntry { file: File; rel: string }
+// 拖放状态：右侧面板遮罩 + 文件夹行精准投放高亮
+const dragActive = ref(false)
+const dropTarget = ref('')
+const dropFilesHint = ref('')
+const selectedFolderName = computed(() => folders.value.find((f: any) => f.id === folderFilter.value)?.path || '')
+function onDragOver(e: DragEvent) {
+  if (!e.dataTransfer?.types.includes('Files')) return
+  dragActive.value = true
+  dropTarget.value = ''
+  const n = e.dataTransfer.items?.length ?? 0
+  dropFilesHint.value = n ? `${n} 个项目` : '文件'
+}
+function onDragLeave(e: DragEvent) {
+  const t = e.currentTarget as HTMLElement | null
+  if (t && e.relatedTarget instanceof Node && t.contains(e.relatedTarget)) return
+  dragActive.value = false
+}
+/** 解析拖入内容：文件直取，目录递归展开并保留相对路径（用于自动建树） */
+async function collectDropEntries(dt: DataTransfer): Promise<DropEntry[]> {
+  const out: DropEntry[] = []
+  const items = Array.from(dt.items || [])
+  const tops = items.map((it) => (it as any).webkitGetAsEntry?.()).filter(Boolean)
+  if (!tops.length) {
+    return Array.from(dt.files || []).map((f) => ({ file: f, rel: '' }))
+  }
+  const walk = (entry: any, prefix: string): Promise<void> => new Promise((resolve) => {
+    if (entry.isFile) {
+      try {
+        entry.file(
+          (f: File) => { out.push({ file: f, rel: prefix + f.name }); resolve() },
+          () => resolve(),
+        )
+      } catch { resolve() }
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader()
+      const readBatch = () => {
+        reader.readEntries(async (ents: any[]) => {
+          if (!ents.length) { resolve(); return }
+          for (const en of ents) await walk(en, prefix + entry.name + '/')
+          readBatch()
+        }, () => resolve())
+      }
+      readBatch()
+    } else resolve()
+  })
+  for (const t of tops) await walk(t, '')
+  return out.slice(0, 500)
+}
+async function doUploadEntries(entries: DropEntry[], folderId: string) {
+  if (!entries.length) {
+    ElMessage.warning('没有可上传的文件')
+    return
+  }
   const fd = new FormData()
-  Array.from(files).forEach((f) => fd.append('files', f))
-  if (folderFilter.value) fd.append('folder_id', folderFilter.value)
-  if (folderPath) fd.append('folder_path', folderPath)
+  entries.forEach((en) => fd.append('files', en.file, en.file.name))
+  fd.append('relpaths', JSON.stringify(entries.map((en) => en.rel)))
+  if (folderId) fd.append('folder_id', folderId)
   if (uploadTags.value) fd.append('tags', uploadTags.value)
+  const targetName = folders.value.find((f: any) => f.id === folderId)?.path || '「上传素材」库'
   try {
     const r = await api.post('/api/assets/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
     const saved = r.data.assets ?? []
     const skipped = r.data.skipped ?? []
     if (skipped.length) {
-      ElMessage.warning(`成功 ${saved.length} 张，跳过 ${skipped.length} 个：${skipped.map((s: any) => s.filename).slice(0, 5).join('、')}${skipped.length > 5 ? '…' : ''}`)
+      ElMessage.warning(`已上传 ${saved.length} 张到${targetName}，跳过 ${skipped.length} 个：${skipped.map((s: any) => s.filename).slice(0, 5).join('、')}${skipped.length > 5 ? '…' : ''}`)
     } else {
-      ElMessage.success(`上传成功 ${saved.length} 张`)
+      ElMessage.success(`已上传 ${saved.length} 张到${targetName}`)
     }
-    load()
+    await loadFolders(); load()
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail || e.message || '上传失败')
   }
 }
-function onPick(e: Event) { const el = e.target as HTMLInputElement; if (el.files?.length) doUpload(el.files); el.value = '' }
+async function onDropPanel(e: DragEvent) {
+  dragActive.value = false
+  dropTarget.value = ''
+  if (!e.dataTransfer) return
+  await doUploadEntries(await collectDropEntries(e.dataTransfer), folderFilter.value)
+}
+async function onDropTo(e: DragEvent, fid: string) {
+  e.stopPropagation()
+  dragActive.value = false
+  dropTarget.value = ''
+  if (!e.dataTransfer) return
+  await doUploadEntries(await collectDropEntries(e.dataTransfer), fid)
+}
+function onPick(e: Event) {
+  const el = e.target as HTMLInputElement
+  if (el.files?.length) void doUploadEntries(Array.from(el.files).map((f) => ({ file: f, rel: '' })), folderFilter.value)
+  el.value = ''
+}
 function onPickDir(e: Event) {
   const el = e.target as HTMLInputElement
   if (!el.files?.length) return
-  // 取公共前缀作为 folder_path，逐文件上传时后端按该树建文件夹
-  const first = (el.files[0] as any).webkitRelativePath || ''
-  const root = first.split('/')[0]
-  doUpload(el.files, root); el.value = ''
+  // 保留 webkitRelativePath，后端在当前选中文件夹下按子树建文件夹
+  void doUploadEntries(
+    Array.from(el.files).map((f) => ({ file: f, rel: (f as any).webkitRelativePath || '' })),
+    folderFilter.value,
+  )
+  el.value = ''
 }
 function openTag(a: any) { editing.value = a; editTags.value = a.tags.join(','); tagOpen.value = true }
 async function saveTags() {
@@ -308,10 +389,28 @@ async function createShare() { await api.post(`/api/assets/${sharing.value.id}/s
 function shareUrl(s: any) { return `${location.origin}${s.url}` }
 async function revoke(s: any) { await api.delete(`/api/shares/${s.id}`); reloadShares() }
 
-onMounted(async () => { await ensureFileToken(); await loadFolders(); await load() })
+function preventNav(e: Event) { e.preventDefault() }
+onMounted(async () => {
+  await ensureFileToken(); await loadFolders(); await load()
+  // 拖到页面空白处也不允许浏览器直接打开文件
+  window.addEventListener('dragover', preventNav)
+  window.addEventListener('drop', preventNav)
+})
+onUnmounted(() => {
+  window.removeEventListener('dragover', preventNav)
+  window.removeEventListener('drop', preventNav)
+})
 </script>
 <style scoped>
-.lib{display:flex;gap:16px;padding:16px}.left{width:260px;flex-shrink:0}.right{flex:1}.row{display:flex;justify-content:space-between;align-items:center}
+.lib{display:flex;gap:16px;padding:16px}.left{width:260px;flex-shrink:0}.right{flex:1;position:relative;min-height:60vh}.row{display:flex;justify-content:space-between;align-items:center}
+.exp-row.drop-hl{background:var(--gloss),var(--ios-blue)!important;border-color:var(--ios-blue-border)!important;color:#fff!important}
+.exp-row.drop-hl .exp-caret,.exp-row.drop-hl .exp-count{color:#fff!important}
+.exp-row.drop-hl .exp-folder{color:#ffe082!important}
+.drop-mask{position:absolute;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;border-radius:12px;
+  background:rgba(10,12,14,.72);border:2px dashed rgba(124,192,247,.8);pointer-events:none}
+.drop-mask-inner{text-align:center}
+.drop-mask-title{font-size:20px;font-weight:800;color:#fff;text-shadow:0 -1px 0 rgba(0,0,0,.8)}
+.drop-mask-sub{margin-top:8px;font-size:13px;color:#7cc0f7}
 .filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
 .fn{font-weight:600;margin-top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{color:#888;font-size:12px}.ops{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
 .hint{color:#888;font-size:12px}.share-row{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap}
