@@ -2,9 +2,31 @@
   <div class="lib">
     <div class="left">
       <h2>素材管理</h2>
-      <div class="row"><h3>文件夹</h3><el-button size="small" @click="newFolder">新建</el-button></div>
-      <el-tree :data="tree" :props="{label:'name',children:'children'}" @node-click="(d:any)=>{folderFilter=d.id;load()}" highlight-current />
-      <el-button size="small" text @click="folderFilter='';load()">全部文件</el-button>
+      <div class="row"><h3>文件夹</h3><el-button size="small" @click="openFolderDialog('')">新建</el-button></div>
+      <!-- 资源管理器式文件夹树：图标 + 三角 + 计数 + 右键菜单 -->
+      <div class="explorer">
+        <div class="exp-row" :class="{active: !folderFilter}" @click="folderFilter='';load()" title="全部文件">
+          <span class="exp-caret"></span>
+          <el-icon class="exp-folder exp-all-icon"><Files /></el-icon>
+          <span class="exp-name">全部文件</span>
+        </div>
+        <div v-for="n in flatFolders" :key="n.id" class="exp-row" :class="{active: folderFilter===n.id}"
+             :style="{paddingLeft: (8 + n.depth*18)+'px'}"
+             @click="selectFolder(n)" @contextmenu.prevent="openMenu($event, n)" title="右键：新建 / 重命名 / 删除">
+          <span class="exp-caret" @click.stop="toggleExpand(n)">
+            <el-icon v-if="n.hasChildren"><CaretBottom v-if="!collapsed.has(n.id)" /><CaretRight v-else /></el-icon>
+          </span>
+          <el-icon class="exp-folder"><FolderOpened v-if="!collapsed.has(n.id)||folderFilter===n.id" /><Folder v-else /></el-icon>
+          <span class="exp-name">{{ n.name }}</span>
+          <span class="exp-count" v-if="n.subtree_count">{{ n.subtree_count }}</span>
+        </div>
+      </div>
+      <div v-if="menu.show" class="ctx-mask" @click="menu.show=false" @contextmenu.prevent="menu.show=false"></div>
+      <div v-if="menu.show" class="ctx-menu" :style="{left: menu.x+'px', top: menu.y+'px'}">
+        <div @click="menuNew"><el-icon><Plus /></el-icon> 新建子文件夹</div>
+        <div @click="menuRename"><el-icon><Edit /></el-icon> 重命名</div>
+        <div class="danger" @click="menuDelete"><el-icon><Delete /></el-icon> 删除</div>
+      </div>
       <div class="row" style="margin-top:12px"><h3>上传</h3></div>
       <input ref="fileInput" type="file" multiple accept="image/*,.avif,.heic,.heif" style="display:none" @change="onPick" />
       <input ref="dirInput" type="file" webkitdirectory style="display:none" @change="onPickDir" />
@@ -38,6 +60,21 @@
         </el-card>
       </div>
     </div>
+    <el-dialog v-model="folderDialog.open" title="新建文件夹" width="380px">
+      <el-form label-width="52px">
+        <el-form-item label="名称"><el-input v-model="folderDialog.name" placeholder="文件夹名" @keyup.enter="createFolder" /></el-form-item>
+        <el-form-item label="位置">
+          <el-select v-model="folderDialog.parent" style="width:100%">
+            <el-option label="顶级目录" value="" />
+            <el-option v-for="f in folders" :key="f.id" :label="f.path" :value="f.id" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="folderDialog.open=false">取消</el-button>
+        <el-button type="primary" @click="createFolder">创建</el-button>
+      </template>
+    </el-dialog>
     <el-dialog v-model="editOpen" title="编辑素材" width="420px">
       <el-input v-model="editTags" placeholder="标签逗号分隔" />
       <el-select v-model="editFolder" clearable placeholder="移动到文件夹" style="width:100%;margin-top:8px">
@@ -63,6 +100,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { CaretBottom, CaretRight, Delete, Edit, Files, Folder, FolderOpened, Plus } from '@element-plus/icons-vue'
 import { api, getFileToken } from '../api/client'
 
 const folders = ref<any[]>([])
@@ -96,15 +134,90 @@ function onImgError(a: any) {
   ensureFileToken(true)
 }
 
-const tree = computed(() => {
-  const map: Record<string, any> = {}
-  folders.value.forEach((f) => (map[f.id] = { ...f, children: [] }))
-  const roots: any[] = []
-  folders.value.forEach((f) => { if (f.parent_id && map[f.parent_id]) map[f.parent_id].children.push(map[f.id]); else roots.push(map[f.id]) })
-  return roots
+// 资源管理器式扁平树（collapsed 为空 = 默认全部展开）
+const collapsed = ref<Set<string>>(new Set())
+const flatFolders = computed(() => {
+  const byParent = new Map<string, any[]>()
+  for (const f of folders.value) {
+    const k = f.parent_id || ''
+    if (!byParent.has(k)) byParent.set(k, [])
+    byParent.get(k)!.push(f)
+  }
+  const out: any[] = []
+  const walk = (pid: string, depth: number) => {
+    for (const f of byParent.get(pid) || []) {
+      const kids = byParent.get(f.id) || []
+      out.push({ ...f, depth, hasChildren: kids.length > 0 })
+      if (kids.length && !collapsed.value.has(f.id)) walk(f.id, depth + 1)
+    }
+  }
+  walk('', 0)
+  return out
 })
+function toggleExpand(n: any) {
+  if (collapsed.value.has(n.id)) collapsed.value.delete(n.id)
+  else collapsed.value.add(n.id)
+}
+function selectFolder(n: any) { folderFilter.value = n.id; load() }
+// 右键菜单
+const menu = ref({ show: false, x: 0, y: 0, folder: null as any })
+function openMenu(e: MouseEvent, n: any) {
+  folderFilter.value = n.id; load()
+  menu.value = { show: true, x: Math.min(e.clientX, innerWidth - 190), y: Math.min(e.clientY, innerHeight - 150), folder: n }
+}
 
 async function loadFolders() { folders.value = (await api.get('/api/assets/folders')).data }
+// 新建文件夹弹窗（parent 可预选为右键/当前文件夹）
+const folderDialog = ref({ open: false, name: '', parent: '' })
+function openFolderDialog(parent = '') {
+  folderDialog.value = { open: true, name: '', parent }
+}
+async function createFolder() {
+  const name = folderDialog.value.name.trim()
+  if (!name) { ElMessage.warning('请输入文件夹名'); return }
+  try {
+    await api.post('/api/assets/folders', { name, parent_id: folderDialog.value.parent || null })
+    folderDialog.value.open = false
+    ElMessage.success('已创建')
+    await loadFolders()
+  } catch (e: any) { ElMessage.error(e.response?.data?.detail || '创建失败') }
+}
+function menuNew() {
+  menu.value.show = false
+  openFolderDialog(menu.value.folder?.id || '')
+}
+async function menuRename() {
+  const n = menu.value.folder
+  menu.value.show = false
+  if (!n) return
+  try {
+    const { value } = await ElMessageBox.prompt('重命名文件夹', '重命名', { inputValue: n.name })
+    if (!value || !value.trim() || value.trim() === n.name) return
+    await api.patch(`/api/assets/folders/${n.id}`, { name: value.trim() })
+    ElMessage.success('已重命名')
+    await loadFolders()
+  } catch (e: any) {
+    if (e?.response) ElMessage.error(e.response.data?.detail || '重命名失败')
+  }
+}
+async function menuDelete() {
+  const n = menu.value.folder
+  menu.value.show = false
+  if (!n) return
+  try {
+    await ElMessageBox.confirm(
+      `删除文件夹「${n.path}」${n.subtree_count ? `（含 ${n.subtree_count} 个素材，素材将移入「上传素材」库）` : ''}？`, '删除文件夹',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+  } catch { return }
+  try {
+    await api.delete(`/api/assets/folders/${n.id}`)
+    ElMessage.success('已删除')
+    await loadFolders()
+    // 若当前筛选的文件夹被删（含后代），回到全部文件
+    if (folderFilter.value && !folders.value.some((f: any) => f.id === folderFilter.value)) folderFilter.value = ''
+    load()
+  } catch (e: any) { ElMessage.error(e.response?.data?.detail || '删除失败') }
+}
 async function load() {
   const p: any = {}
   if (folderFilter.value) p.folder_id = folderFilter.value
@@ -114,20 +227,6 @@ async function load() {
   if (isoMin.value) p.iso_min = isoMin.value
   if (uploader.value) p.uploader = uploader.value
   assets.value = (await api.get('/api/assets', { params: p })).data
-}
-async function newFolder() {
-  const { value } = await ElMessageBox.prompt('文件夹名（可用 a/b 建多级）', '新建文件夹')
-  if (!value) return
-  const parts = String(value).split('/').filter(Boolean)
-  let parent: string | undefined
-  for (const name of parts) {
-    const path = folders.value.find((f) => f.id === parent)?.path
-    try {
-      const r = await api.post('/api/assets/folders', { name, parent_id: parent })
-      parent = r.data.id
-    } catch { const hit = folders.value.find((f) => f.name === name && (f.parent_id || undefined) === parent); if (hit) parent = hit.id }
-  }
-  await loadFolders()
 }
 async function doUpload(files: FileList, folderPath = '') {
   const fd = new FormData()

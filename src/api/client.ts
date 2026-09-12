@@ -1,13 +1,17 @@
 import axios from 'axios'
+import { ref } from 'vue'
 
 export const api = axios.create({ baseURL: '', withCredentials: true })
 
 let access = localStorage.getItem('access_token') || ''
+/* 登录态变化计数器：让顶栏 v-if 即时响应登录/退出（access 本身非响应式） */
+export const authTick = ref(0)
 
 export function setToken(t: string) {
   access = t
   if (t) localStorage.setItem('access_token', t)
   else localStorage.removeItem('access_token')
+  authTick.value++
 }
 export function getToken() {
   return access

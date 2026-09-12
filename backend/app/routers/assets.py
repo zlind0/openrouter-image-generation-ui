@@ -6,7 +6,7 @@ import uuid
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ..core.config import settings
@@ -77,7 +77,17 @@ def _ensure_folder(db: Session, path: str, owner: User) -> str | None:
 @router.get("/folders")
 def list_folders(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     rows = db.query(Folder).order_by(Folder.path).all()
-    return [{"id": f.id, "name": f.name, "parent_id": f.parent_id, "path": f.path} for f in rows]
+    id2path = {f.id: f.path for f in rows}
+    direct = dict(
+        db.query(Asset.folder_id, func.count(Asset.id)).filter(Asset.folder_id.isnot(None)).group_by(Asset.folder_id).all()
+    )
+    out = []
+    for f in rows:
+        sub = sum(c for fid, c in direct.items()
+                  if fid in id2path and (id2path[fid] == f.path or id2path[fid].startswith(f.path + "/")))
+        out.append({"id": f.id, "name": f.name, "parent_id": f.parent_id, "path": f.path,
+                    "asset_count": direct.get(f.id, 0), "subtree_count": sub})
+    return out
 
 
 @router.post("/folders")
@@ -99,6 +109,53 @@ def create_folder(body: dict, user: User = Depends(get_current_user), db: Sessio
     db.add(f)
     db.commit()
     return {"id": f.id, "path": f.path}
+
+
+class FolderPatch(BaseModel):
+    name: str
+
+
+@router.patch("/folders/{fid}")
+def rename_folder(fid: str, body: FolderPatch, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    f = db.get(Folder, fid)
+    if not f:
+        raise HTTPException(404, "文件夹不存在")
+    name = body.name.strip().replace("/", "")
+    if not name:
+        raise HTTPException(400, "文件夹名不能为空")
+    parent = db.get(Folder, f.parent_id) if f.parent_id else None
+    new_path = f"{parent.path}/{name}" if parent else name
+    if new_path != f.path and db.query(Folder).filter(Folder.path == new_path).first():
+        raise HTTPException(400, "同级已有同名文件夹")
+    old_path = f.path
+    f.name = name
+    f.path = new_path
+    # 后代路径同步改前缀
+    for d in db.query(Folder).filter(Folder.path.startswith(old_path + "/")).all():
+        d.path = new_path + d.path[len(old_path):]
+    db.commit()
+    return {"id": f.id, "path": f.path}
+
+
+@router.delete("/folders/{fid}")
+def delete_folder(fid: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    f = db.get(Folder, fid)
+    if not f:
+        raise HTTPException(404, "文件夹不存在")
+    # 整棵子树：先删文件夹，再确保默认库存在，名下所有素材回归默认库
+    victim_paths = [f.path]
+    for d in db.query(Folder).filter(Folder.path.startswith(f.path + "/")).all():
+        victim_paths.append(d.path)
+    victim_ids = [g.id for g in db.query(Folder).filter(Folder.path.in_(victim_paths)).all()]
+    for g in db.query(Folder).filter(Folder.path.in_(victim_paths)).all():
+        db.delete(g)
+    db.flush()
+    inbox = ensure_default_folder(db)  # 若删的正是默认库，此处重建
+    if victim_ids:
+        db.query(Asset).filter(Asset.folder_id.in_(victim_ids)).update(
+            {Asset.folder_id: inbox.id}, synchronize_session=False)
+    db.commit()
+    return {"ok": True}
 
 
 class SkippedFile(Exception):
