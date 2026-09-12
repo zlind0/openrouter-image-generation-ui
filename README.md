@@ -1,32 +1,37 @@
-# OpenRouter 图像生成客户端
+# OpenRouter 图像生成 · 网页版（服务端）
 
-Tauri + Vue 3 + Vite 实现的 OpenRouter Image API 客户端。
+Tauri 桌面端已移除（`server` 分支），改为 `FastAPI` 后端 + `Vue3` 前端同源部署。
 
-API 依据：`GET /api/v1/images/models`、`GET /api/v1/images/models/{author}/{slug}/endpoints`、`POST /api/v1/images`（支持 `stream: true` SSE）。
+## 架构
 
-网络请求全部经 Rust（reqwest）发送，支持 http/https/socks5 代理（含认证），对模型/生成/余额/参考图拉取全量生效。
+- 前端：`src/`（Vue3 + Element Plus + vue-router），`npm run build` 产出 `dist/`，生产由 FastAPI 同源托管。
+- 后端：`backend/app/`（FastAPI）。Key 永不落地前端，所有 OpenRouter 调用经 `/api/openrouter/*` 服务端代理。
+- 数据：PostgreSQL（compose）/ SQLite（本地开发），文件存 `DATA_DIR` 本地磁盘。
 
-## 开发
-
-```bash
-npm install
-npm run app:dev   # Tauri 窗口 + Vite(5173) 联调
-npm run dev       # 纯浏览器预览（代理不生效）
-```
-
-## 构建
+## 本地开发
 
 ```bash
-npm run build   # tauri build 打安装包
+cp backend/.env.example .env   # 填 APP_MASTER_KEY(openssl rand -base64 32) / JWT_SECRET(openssl rand -hex 32) / ADMIN_PASSWORD
+pip install -r backend/requirements.txt
+python -m uvicorn backend.app.main:app --port 8000
+npm install && npm run dev      # 5173，/api 自动代理到 8000
 ```
 
-## 功能
+首启会用 `ADMIN_USERNAME/ADMIN_PASSWORD` 创建唯一管理员，登录后请在「管理」页配置 OpenRouter Key（AES-256-GCM 加密存储）并分配普通用户。
 
-- 顶部设置界面填写并保存 `sk-or-...` API Key（localStorage）
-- 从 OpenRouter 读取全部图像模型（`supported_parameters` 能力描述符：enum/range/boolean）
-- 选中模型后拉取端点级精确参数并提供默认值：
-  - enum（resolution/aspect_ratio/quality/output_format/background）默认取保守值、可选"不发送"
-  - n 默认 1、output_compression 默认 80、seed 留空随机、size 留空、stream 默认关
-- 参考图：文件选择（Electron 原生 dialog / Web fallback）、拖拽、prompt 输入框及全局剪贴板 Ctrl/Cmd+V 粘贴、图片 URL 添加
-- 生成结果展示、保存到本地、作为参考图二次编辑；流式预览（partial_image 事件）
-- Provider 路由选择（only），显示各端点价格与透传参数
+## 服务器部署
+
+```bash
+# .env 填好 DOMAIN 等，Caddyfile 中的 {$DOMAIN} 替换为真实域名
+docker compose up -d --build
+```
+
+Caddy 自动签发 HTTPS，反代 `api:8000`。
+
+## 关键特性
+
+- **鉴权**：Argon2id 密码哈希；access JWT(15min)+refresh旋转(HttpOnly Cookie)；单管理员约束；普通用户仅管理自己上传的素材。
+- **Key加密**：`APP_MASTER_KEY` 仅来自环境变量；DB 只存 `AES-256-GCM` 密文+nonce+指纹；前端仅见掩码；解密只在服务端内存中转发瞬间发生。
+- **素材库**：文件夹树、按文件夹上传（相对路径自动建树）、tag（AND/OR）、EXIF（机身/镜头/ISO…）+文件名/上传者筛选。
+- **AVIF向后兼容**：上传原样保存 + 预生成 JPEG 兜底(4:2:0)+WebP缩略图；服务端按 `Accept`/`User-Agent`（Firefox 等）或 `?compat=1` 自动返回 JPEG，响应头 `X-Served-Fallback: avif-to-jpeg`。
+- **图床**：`POST /api/assets/{id}/shares` 生成 `/s/{token}` 公开链接（`<img src>` 可直接引用），每次访问记 IP/UA 与计数，`GET /api/shares/{id}/stats` 查看，`DELETE /api/shares/{id}` 撤销（撤销后 404）。

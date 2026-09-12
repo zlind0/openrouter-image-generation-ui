@@ -1,0 +1,5 @@
+# 本地：直接监听 80，浏览器开 http://localhost
+# 远程服务器：把 ":80" 改成你的域名（如 img.example.com），Caddy 自动签发 HTTPS
+:80 {
+	reverse_proxy api:8000
+}

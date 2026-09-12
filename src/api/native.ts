@@ -1,42 +1,14 @@
-import { invoke, Channel, isTauri } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
-import type { ProxySettings } from './settings'
-
-/** 是否跑在 Tauri 壳里；浏览器直接预览（npm run dev）时为 false，走 fetch/input/a[download] 降级 */
-export const IN_TAURI = isTauri()
-
-export interface ProxyWire {
-  enabled: boolean
-  /** 注意：Rust 侧 serde rename 要的是字面 `type`，嵌套对象不走大小写转换，必须原样发 */
-  type: string
-  url: string
-  username: string
-  password: string
-}
-
-/** 设置对象转 Rust 命令参数（TypeScript 里 `type` 作键名合法） */
-export function proxyWire(p?: ProxySettings | null): ProxyWire | null {
-  if (!p) return null
-  return {
-    enabled: p.enabled,
-    type: p.type,
-    url: p.url,
-    username: p.username,
-    password: p.password,
-  }
-}
+/** Pure-web helpers (Tauri removed). File pick / download / URL fetch. */
 
 export function isMacOS(): boolean {
   return /macintosh|mac os x/i.test(navigator.userAgent)
 }
 
-/* ---- 参考图：文件选择（Tauri 原生对话框 / 浏览器 input） ---- */
 export async function pickImages(): Promise<Array<{ name: string; dataUrl: string }>> {
-  if (IN_TAURI) return invoke('pick_images')
   return new Promise((resolve) => {
     const input = document.createElement('input')
     input.type = 'file'
-    input.accept = 'image/*'
+    input.accept = 'image/*,.avif,.heic,.heif'
     input.multiple = true
     input.onchange = () => {
       if (!input.files) {
@@ -59,36 +31,27 @@ export async function pickImages(): Promise<Array<{ name: string; dataUrl: strin
   })
 }
 
-/* ---- 保存图片（Tauri 原生另存为 / 浏览器 a[download]） ---- */
 export async function saveImage(payload: {
   b64: string
   mediaType?: string
   suggestedName?: string
 }): Promise<{ saved: boolean; path?: string }> {
-  if (IN_TAURI) {
-    return invoke('save_image', {
-      b64: payload.b64,
-      mediaType: payload.mediaType,
-      suggestedName: payload.suggestedName,
-    })
-  }
   const mime = payload.mediaType || 'image/png'
+  const b64 = payload.b64.includes(',') ? payload.b64.split(',')[1] : payload.b64
+  const bin = atob(b64)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  const blob = new Blob([bytes], { type: mime })
+  const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
-  a.href = `data:${mime};base64,${payload.b64}`
+  a.href = url
   a.download = payload.suggestedName || `or-image-${Date.now()}.png`
   a.click()
-  return { saved: false }
+  setTimeout(() => URL.revokeObjectURL(url), 5000)
+  return { saved: true }
 }
 
-/* ---- 图片 URL 转 dataURL（Tauri 经 Rust+代理拉取 / 浏览器直连 fetch） ---- */
-export async function fetchImageDataUrl(u: string, proxy?: ProxySettings | null): Promise<string> {
-  if (IN_TAURI) {
-    const r = await invoke<{ dataUrl: string }>('fetch_image_url', {
-      url: u,
-      proxy: proxyWire(proxy),
-    })
-    return r.dataUrl
-  }
+export async function fetchImageDataUrl(u: string): Promise<string> {
   const res = await fetch(u)
   if (!res.ok) throw new Error(`拉图失败 (${res.status})`)
   const blob = await res.blob()
@@ -99,15 +62,3 @@ export async function fetchImageDataUrl(u: string, proxy?: ProxySettings | null)
     fr.readAsDataURL(blob)
   })
 }
-
-/* ---- 自绘标题栏窗口控制 ---- */
-export const minimizeWin = () => invoke('win_minimize')
-export const toggleMaxWin = () => invoke('win_toggle_maximize')
-export const closeWin = () => invoke('win_close')
-export const getMaxed = async (): Promise<boolean> => (IN_TAURI ? invoke('win_is_maximized') : false)
-export function onMaxState(cb: (maxed: boolean) => void): void {
-  if (!IN_TAURI) return
-  void listen<boolean>('window:max-state', (e) => cb(e.payload))
-}
-
-export { Channel, isTauri }
