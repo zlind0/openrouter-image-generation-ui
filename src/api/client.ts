@@ -60,13 +60,16 @@ export function fileSrc(url: string): string {
   return url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(fileToken)
 }
 
-// ---- OpenRouter proxy (Key 永不落地前端) ----
+// ---- OpenRouter proxy (Key 永不落地前端；模型/余额/端点走服务端 24h 缓存) ----
 export const orApi = {
+  // 读服务端缓存（超期服务端自动回源，一天最多一次）；刷新按钮调下面的 refresh* 强制回源
   models: () => api.get('/api/openrouter/models').then((r) => r.data.data ?? r.data),
+  refreshModels: () => api.post('/api/openrouter/models/refresh').then((r) => r.data.data ?? r.data),
   endpoints: (id: string) => {
     const [author, ...rest] = id.split('/')
     return api.get(`/api/openrouter/models/${author}/${rest.join('/')}/endpoints`).then((r) => r.data.endpoints ?? []);
   },
   generate: (body: object) => api.post('/api/openrouter/images', body).then((r) => r.data),
   keyInfo: () => api.get('/api/openrouter/key').then((r) => r.data.data ?? r.data),
+  refreshBalance: () => api.post('/api/openrouter/key/refresh').then((r) => r.data.data ?? r.data),
 }

@@ -7,7 +7,7 @@ from ..core.crypto import decrypt_api_key, encrypt_api_key, fingerprint, masked
 from ..core.security import hash_password
 from ..db.session import get_db
 from ..deps import require_admin
-from ..models import AppSetting, AuditLog, User
+from ..models import AppSetting, AuditLog, ServerCache, User
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -111,6 +111,10 @@ def set_key(body: KeyIn, admin: User = Depends(require_admin), db: Session = Dep
 
     s.updated_at = datetime.now(timezone.utc)
     db.add(AuditLog(actor=admin.username, action="key.rotate", detail=f"fp={s.or_key_fingerprint}"))
+    # Key 已换：模型/余额/端点缓存全部失效，下次访问自动回源重刷
+    #（直接删 server_cache 行，避免与 openrouter 路由模块循环引用）
+    for rec in db.query(ServerCache).filter(ServerCache.key.startswith("openrouter.")).all():
+        db.delete(rec)
     db.commit()
     return {"ok": True, "masked": s.or_key_masked, "fingerprint": s.or_key_fingerprint}
 

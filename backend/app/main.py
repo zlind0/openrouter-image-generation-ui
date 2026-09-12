@@ -8,7 +8,7 @@ from .core.config import settings
 from .db.session import SessionLocal, init_db
 from .models import AuditLog, User
 from .core.security import hash_password
-from .routers import admin, assets, auth, openrouter, shares
+from .routers import admin, assets, auth, history, openrouter, shares
 
 app = FastAPI(title=settings.app_name)
 
@@ -25,6 +25,7 @@ app.include_router(admin.router)
 app.include_router(openrouter.router)
 app.include_router(assets.router)
 app.include_router(shares.router)
+app.include_router(history.router)
 
 
 @app.on_event("startup")

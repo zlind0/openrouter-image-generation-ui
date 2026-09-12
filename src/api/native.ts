@@ -4,7 +4,7 @@ export function isMacOS(): boolean {
   return /macintosh|mac os x/i.test(navigator.userAgent)
 }
 
-export async function pickImages(): Promise<Array<{ name: string; dataUrl: string }>> {
+export async function pickImages(): Promise<Array<{ name: string; dataUrl: string; file: File }>> {
   return new Promise((resolve) => {
     const input = document.createElement('input')
     input.type = 'file'
@@ -17,9 +17,9 @@ export async function pickImages(): Promise<Array<{ name: string; dataUrl: strin
       }
       const jobs = Array.from(input.files).map(
         (f) =>
-          new Promise<{ name: string; dataUrl: string }>((res, rej) => {
+          new Promise<{ name: string; dataUrl: string; file: File }>((res, rej) => {
             const rd = new FileReader()
-            rd.onload = () => res({ name: f.name, dataUrl: String(rd.result) })
+            rd.onload = () => res({ name: f.name, dataUrl: String(rd.result), file: f })
             rd.onerror = () => rej(new Error('读取文件失败'))
             rd.readAsDataURL(f)
           }),

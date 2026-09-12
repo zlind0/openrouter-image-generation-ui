@@ -139,3 +139,34 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(64), index=True)
     detail: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ServerCache(Base):
+    """服务端缓存：OpenRouter 模型列表/余额/端点，24h TTL。
+    GET 接口只读缓存（超期才回源，相当于每天最多自动刷一次），
+    POST /refresh 接口强制回源。换 Key 时整组失效。"""
+    __tablename__ = "server_cache"
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    value_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GenerationHistory(Base):
+    """生成历史（服务端持久化，每用户最新 100 条）：
+    点选还原 prompt/参数/provider/参考图；原图与缩略图落盘存放。"""
+    __tablename__ = "generation_history"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    model: Mapped[str] = mapped_column(String(255))
+    prompt: Mapped[str] = mapped_column(Text)
+    params_json: Mapped[str] = mapped_column(Text, default="{}")
+    provider_choice: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # 参考图：素材 asset id 列表（上传即自动入库，从库选择的本就是 asset）
+    reference_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    # 生成图：相对 DATA_DIR 的原图路径列表，与 image_mimes_json 一一对应
+    image_paths_json: Mapped[str] = mapped_column(Text, default="[]")
+    image_mimes_json: Mapped[str] = mapped_column(Text, default="[]")
+    usage_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cost: Mapped[float | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

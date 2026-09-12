@@ -52,9 +52,18 @@
           <div class="meta">{{ a.width }}×{{ a.height }} · {{ a.owner }} · {{ (a.exif.Make||'')+' '+(a.exif.Model||'') }}</div>
           <div class="tags"><el-tag v-for="t in a.tags" :key="t" size="small" style="margin:2px">{{ t }}</el-tag></div>
           <div class="ops">
-            <el-button size="small" @click="openEdit(a)">标签/移动</el-button>
-            <el-button size="small" @click="makeShare(a)">公开链接</el-button>
-            <el-button size="small" type="danger" @click="remove(a)">删除</el-button>
+            <el-tooltip content="移动到文件夹" placement="top">
+              <el-button circle size="small" @click="openMove(a)"><el-icon><Rank /></el-icon></el-button>
+            </el-tooltip>
+            <el-tooltip content="编辑标签" placement="top">
+              <el-button circle size="small" @click="openTag(a)"><el-icon><PriceTag /></el-icon></el-button>
+            </el-tooltip>
+            <el-tooltip content="公开链接（图床分享）" placement="top">
+              <el-button circle size="small" @click="makeShare(a)"><el-icon><Share /></el-icon></el-button>
+            </el-tooltip>
+            <el-tooltip content="删除" placement="top">
+              <el-button circle size="small" type="danger" @click="remove(a)"><el-icon><Delete /></el-icon></el-button>
+            </el-tooltip>
           </div>
           <div v-if="a.mime==='image/avif'" class="hint">AVIF：Firefox 等旧端访问自动返回 JPEG（<a :href="compatUrl(a)" target="_blank">预览兜底</a>）</div>
         </el-card>
@@ -75,24 +84,35 @@
         <el-button type="primary" @click="createFolder">创建</el-button>
       </template>
     </el-dialog>
-    <el-dialog v-model="editOpen" title="编辑素材" width="420px">
-      <el-input v-model="editTags" placeholder="标签逗号分隔" />
-      <el-select v-model="editFolder" clearable placeholder="移动到文件夹" style="width:100%;margin-top:8px">
+    <el-dialog v-model="tagOpen" title="编辑标签" width="380px">
+      <el-input v-model="editTags" placeholder="标签，逗号分隔" @keyup.enter="saveTags" />
+      <template #footer>
+        <el-button @click="tagOpen=false">取消</el-button>
+        <el-button type="primary" @click="saveTags">保存</el-button>
+      </template>
+    </el-dialog>
+    <el-dialog v-model="moveOpen" title="移动到文件夹" width="380px">
+      <el-select v-model="editFolder" placeholder="选择文件夹" style="width:100%">
         <el-option v-for="f in folders" :key="f.id" :label="f.path" :value="f.id" />
       </el-select>
-      <template #footer><el-button type="primary" @click="saveEdit">保存</el-button></template>
+      <template #footer>
+        <el-button @click="moveOpen=false">取消</el-button>
+        <el-button type="primary" @click="saveMove">移动</el-button>
+      </template>
     </el-dialog>
     <el-dialog v-model="shareOpen" title="图床公开链接" width="520px">
-      <p>可在任意网页 <code>&lt;img src="URL"&gt;</code> 引用。访问会被统计 IP/次数，可随时撤销。</p>
+      <p>可在任意网页 <code>&lt;img src="URL"&gt;</code> 引用。访问统计默认展开，可随时撤销。</p>
       <el-button size="small" @click="createShare">生成新链接</el-button>
-      <div v-for="s in shares" :key="s.id" class="share-row">
-        <code>{{ shareUrl(s) }}</code>
-        <span>访问 {{ s.view_count }} 次 {{ s.revoked ? '（已撤销）' : '' }}</span>
-        <el-button size="small" @click="showStats(s)">统计</el-button>
-        <el-button size="small" type="danger" @click="revoke(s)" :disabled="s.revoked">撤销</el-button>
-      </div>
-      <div v-if="stats" style="margin-top:8px"><h4>访问统计（总 {{ stats.view_count }}）</h4>
-        <div v-for="(c,ip) in stats.by_ip" :key="ip">{{ ip }}: {{ c }} 次</div>
+      <div v-for="s in shares" :key="s.id" class="share-block">
+        <div class="share-row">
+          <code>{{ shareUrl(s) }}</code>
+          <el-button size="small" type="danger" @click="revoke(s)" :disabled="s.revoked">撤销</el-button>
+        </div>
+        <div class="share-stats" v-if="s.stats">
+          <div>累计访问 {{ s.stats.view_count }} 次 {{ s.revoked ? '（已撤销）' : '' }}</div>
+          <div v-for="(c,ip) in s.stats.by_ip" :key="ip">{{ ip }}：{{ c }} 次</div>
+          <div v-for="v in (s.stats.recent||[]).slice(0,5)" :key="v.at+v.ip" class="stat-recent">{{ v.at }} · {{ v.ip }}</div>
+        </div>
       </div>
     </el-dialog>
   </div>
@@ -100,7 +120,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CaretBottom, CaretRight, Delete, Edit, Files, Folder, FolderOpened, Plus } from '@element-plus/icons-vue'
+import { CaretBottom, CaretRight, Delete, Edit, Files, Folder, FolderOpened, Plus, PriceTag, Rank, Share } from '@element-plus/icons-vue'
 import { api, getFileToken } from '../api/client'
 
 const folders = ref<any[]>([])
@@ -111,8 +131,12 @@ const isoMin = ref<number | undefined>(undefined)
 const uploadTags = ref('')
 const fileInput = ref<HTMLInputElement|null>(null)
 const dirInput = ref<HTMLInputElement|null>(null)
-const editOpen = ref(false), editTags = ref(''), editFolder = ref(''), editing = ref<any>(null)
-const shareOpen = ref(false), shares = ref<any[]>([]), sharing = ref<any>(null), stats = ref<any>(null)
+const editTags = ref('')
+const editFolder = ref('')
+const editing = ref<any>(null)
+const tagOpen = ref(false)
+const moveOpen = ref(false)
+const shareOpen = ref(false), shares = ref<any[]>([]), sharing = ref<any>(null)
 // <img> 发不出 Authorization 头，图片 URL 拼 ?token= 文件令牌（aud=files，仅能读图）
 const ftoken = ref('')
 const imgRetried = new Set<string>()
@@ -257,20 +281,31 @@ function onPickDir(e: Event) {
   const root = first.split('/')[0]
   doUpload(el.files, root); el.value = ''
 }
-function openEdit(a: any) { editing.value = a; editTags.value = a.tags.join(','); editFolder.value = a.folder_id || ''; editOpen.value = true }
-async function saveEdit() {
-  await api.patch(`/api/assets/${editing.value.id}`, { tags: editTags.value.split(',').map((s) => s.trim()).filter(Boolean), folder_id: editFolder.value || null })
-  editOpen.value = false; load()
+function openTag(a: any) { editing.value = a; editTags.value = a.tags.join(','); tagOpen.value = true }
+async function saveTags() {
+  await api.patch(`/api/assets/${editing.value.id}`, { tags: editTags.value.split(',').map((s) => s.trim()).filter(Boolean) })
+  tagOpen.value = false; load()
+}
+function openMove(a: any) { editing.value = a; editFolder.value = a.folder_id || ''; moveOpen.value = true }
+async function saveMove() {
+  await api.patch(`/api/assets/${editing.value.id}`, { folder_id: editFolder.value || null })
+  moveOpen.value = false; load()
 }
 async function remove(a: any) {
   await ElMessageBox.confirm(`删除 ${a.filename}？`, '确认', { type: 'warning' })
   await api.delete(`/api/assets/${a.id}`); load()
 }
-async function makeShare(a: any) { sharing.value = a; shareOpen.value = true; stats.value = null; await reloadShares() }
-async function reloadShares() { shares.value = (await api.get('/api/shares')).data.filter((s: any) => s.asset_id === sharing.value.id) }
+async function makeShare(a: any) { sharing.value = a; shareOpen.value = true; await reloadShares() }
+async function reloadShares() {
+  const list = (await api.get('/api/shares')).data.filter((s: any) => s.asset_id === sharing.value.id)
+  shares.value = list
+  // 统计默认展开：逐个拉取后直接挂在链接上展示
+  for (const s of shares.value) {
+    try { s.stats = (await api.get(`/api/shares/${s.id}/stats`)).data } catch { s.stats = null }
+  }
+}
 async function createShare() { await api.post(`/api/assets/${sharing.value.id}/shares`, {}); reloadShares() }
 function shareUrl(s: any) { return `${location.origin}${s.url}` }
-async function showStats(s: any) { stats.value = (await api.get(`/api/shares/${s.id}/stats`)).data }
 async function revoke(s: any) { await api.delete(`/api/shares/${s.id}`); reloadShares() }
 
 onMounted(async () => { await ensureFileToken(); await loadFolders(); await load() })
@@ -280,4 +315,9 @@ onMounted(async () => { await ensureFileToken(); await loadFolders(); await load
 .filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
 .fn{font-weight:600;margin-top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{color:#888;font-size:12px}.ops{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
 .hint{color:#888;font-size:12px}.share-row{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap}
+.share-block{margin:10px 0;padding:8px 10px;border-radius:8px;background:rgba(0,0,0,.28);border:1px solid rgba(0,0,0,.5)}
+.share-block .share-row{margin:0 0 6px}
+.share-block code{flex:1;word-break:break-all;font-size:12px}
+.share-stats{font-size:12px;color:#b9b2a0;line-height:1.7}
+.share-stats .stat-recent{color:#8f8875;font-size:11px}
 </style>
