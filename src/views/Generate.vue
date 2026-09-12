@@ -43,6 +43,7 @@
           <div v-for="a in libAssets" :key="a.id" class="pick-item" :class="{sel: libRefIds.has(a.id)}" @click="toggleLibRef(a)" :title="a.filename">
             <el-image :src="authUrl(a.thumb_url)" fit="cover" />
             <span v-if="libRefIds.has(a.id)" class="pick-check">✓</span>
+            <span v-if="a.is_pinned" class="pick-pin" title="置顶素材">顶</span>
             <div class="pick-name">{{ a.filename }}</div>
           </div>
         </div>
@@ -528,6 +529,7 @@ onMounted(async () => {
 .pick-item .el-image{width:100%;height:110px;display:block}
 .pick-item.sel{border-color:var(--el-color-primary)}
 .pick-check{position:absolute;top:4px;right:4px;background:var(--el-color-primary);color:#fff;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;font-size:12px}
+.pick-pin{position:absolute;top:4px;left:4px;background:linear-gradient(to bottom,#f6c453,#d9930d);color:#3a2703;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:800;box-shadow:0 1px 3px rgba(0,0,0,.5)}
 .pick-name{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:2px 4px}
 /* 左侧栏：深皮革面板 + 深色 tabs */
 .side{position:sticky;top:16px;max-height:calc(100vh - 100px);overflow-y:auto;padding:14px;border-radius:12px;

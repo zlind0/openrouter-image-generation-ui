@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from ..core.config import settings
 from ..db.session import get_db
 from ..deps import can_manage_asset, get_current_user, get_file_user
-from ..models import Asset, AssetTag, Folder, Tag, User
+from ..models import Asset, AssetPin, AssetTag, Folder, Tag, User
 from ..services.exif_util import extract_exif
 from ..services.image_util import (
     ALLOWED_EXTS,
@@ -235,11 +235,14 @@ def _asset_out(db: Session, a: Asset) -> dict:
     tag_ids = [r.tag_id for r in db.query(AssetTag).filter(AssetTag.asset_id == a.id).all()]
     tags = [t.name for t in db.query(Tag).filter(Tag.id.in_(tag_ids)).all()] if tag_ids else []
     owner = db.get(User, a.owner_id)
+    pin = db.get(AssetPin, a.id)
     return {
         "id": a.id, "filename": a.filename, "mime": a.mime, "size_bytes": a.size_bytes,
         "width": a.width, "height": a.height, "exif": a.exif or {}, "tags": tags,
         "folder_id": a.folder_id, "owner": owner.username if owner else "?",
         "owner_id": a.owner_id, "source": a.source,
+        "is_pinned": pin is not None,
+        "pinned_at": pin.pinned_at.isoformat() if pin and pin.pinned_at else None,
         "file_url": f"/api/assets/{a.id}/file",
         "thumb_url": f"/api/assets/{a.id}/thumb" if a.thumb_path else f"/api/assets/{a.id}/file",
         "created_at": a.created_at.isoformat() if a.created_at else None,
@@ -334,6 +337,7 @@ def list_assets(
     iso_min: int | None = None,
     iso_max: int | None = None,
     uploader: str = "",
+    sort: str = Query("newest", pattern="^(newest|oldest|name)$"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -347,7 +351,13 @@ def list_assets(
     if uploader:
         u = db.query(User).filter(User.username == uploader).first()
         query = query.filter(Asset.owner_id == u.id) if u else query.filter(False)
-    rows = query.order_by(Asset.created_at.desc()).limit(500).all()
+    if sort == "oldest":
+        query = query.order_by(Asset.created_at.asc())
+    elif sort == "name":
+        query = query.order_by(Asset.filename.asc())
+    else:
+        query = query.order_by(Asset.created_at.desc())
+    rows = query.limit(500).all()
     # tag + exif 在 Python 侧过滤（量<20人可接受；大了再改 SQL JSONB 查询）
     tag_list = [_norm_tag(t) for t in tags.split(",") if t.strip()]
     res = []
@@ -372,6 +382,12 @@ def list_assets(
         if iso_max is not None and (iso is None or iso > iso_max):
             continue
         res.append(_asset_out(db, a) | {"tags": sorted(tnames)})
+    # 置顶永远排最前（任何排序下成立），置顶之间按置顶时间倒序
+    pins = {p.asset_id: p for p in db.query(AssetPin).all()}
+    pinned = [d for d in res if pins.get(d["id"])]
+    pinned.sort(key=lambda d: pins[d["id"]].pinned_at.isoformat() if pins[d["id"]].pinned_at else "", reverse=True)
+    rest = [d for d in res if not pins.get(d["id"])]
+    res = pinned + rest
     return res
 
 
@@ -416,9 +432,41 @@ def delete_asset(aid: str, user: User = Depends(get_current_user), db: Session =
                 os.remove(os.path.join(_data_dir(), rel))
             except OSError:
                 pass
+    db.query(AssetPin).filter(AssetPin.asset_id == aid).delete()
     db.delete(a)
     db.commit()
     return {"ok": True}
+
+
+@router.post("/{aid}/pin")
+def pin_asset(aid: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    a = db.get(Asset, aid)
+    if not a:
+        raise HTTPException(404, "素材不存在")
+    if not can_manage_asset(user, a.owner_id):
+        raise HTTPException(403, "仅上传者/管理员可置顶")
+    from datetime import datetime, timezone
+
+    pin = db.get(AssetPin, aid)
+    if pin:
+        pin.pinned_by = user.id
+        pin.pinned_at = datetime.now(timezone.utc)
+    else:
+        db.add(AssetPin(asset_id=aid, pinned_by=user.id, pinned_at=datetime.now(timezone.utc)))
+    db.commit()
+    return {"ok": True, "is_pinned": True}
+
+
+@router.delete("/{aid}/pin")
+def unpin_asset(aid: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    a = db.get(Asset, aid)
+    if not a:
+        raise HTTPException(404, "素材不存在")
+    if not can_manage_asset(user, a.owner_id):
+        raise HTTPException(403, "仅上传者/管理员可取消置顶")
+    db.query(AssetPin).filter(AssetPin.asset_id == aid).delete()
+    db.commit()
+    return {"ok": True, "is_pinned": False}
 
 
 def _serve_file(asset: Asset, request: Request, thumb: bool = False):

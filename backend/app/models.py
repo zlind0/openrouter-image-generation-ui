@@ -99,6 +99,14 @@ class AssetTag(Base):
     tag_id: Mapped[str] = mapped_column(ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True)
 
 
+class AssetPin(Base):
+    """素材置顶：独立表（免迁移），置顶者在任何排序下永远排最前，按置顶时间倒序。"""
+    __tablename__ = "asset_pins"
+    asset_id: Mapped[str] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"), primary_key=True)
+    pinned_by: Mapped[str] = mapped_column(String(32))
+    pinned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Generation(Base):
     """每次生成记账：共享 Key 下区分用户成本。"""
     __tablename__ = "generations"

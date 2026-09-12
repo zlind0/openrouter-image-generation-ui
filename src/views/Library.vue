@@ -51,11 +51,17 @@
         <el-input v-model="make" placeholder="EXIF: Canon/Sony…" clearable style="width:180px" @change="load" />
         <el-input-number v-model="isoMin" placeholder="ISO min" controls-position="right" style="width:130px" @change="load" />
         <el-input v-model="uploader" placeholder="上传者" clearable style="width:130px" @change="load" />
+        <el-select v-model="sort" style="width:120px" @change="load">
+          <el-option label="最新优先" value="newest" />
+          <el-option label="最早优先" value="oldest" />
+          <el-option label="按名称" value="name" />
+        </el-select>
         <el-button @click="load">筛选</el-button>
       </div>
       <div class="grid">
         <el-card v-for="a in assets" :key="a.id" class="card">
           <el-image :src="srcOf(a,'thumb_url')" fit="cover" style="width:100%;height:160px" :preview-src-list="[srcOf(a,'file_url')]" title="缩略图，点击加载原图" @error="onImgError(a)" />
+          <span v-if="a.is_pinned" class="pin-badge" title="置顶素材，任何排序下保持最前">置顶</span>
           <div class="fn">{{ a.filename }}</div>
           <div class="meta">{{ a.width }}×{{ a.height }} · {{ a.owner }} · {{ (a.exif.Make||'')+' '+(a.exif.Model||'') }}</div>
           <div class="tags"><el-tag v-for="t in a.tags" :key="t" size="small" style="margin:2px">{{ t }}</el-tag></div>
@@ -69,6 +75,9 @@
             <el-tooltip content="公开链接（图床分享）" placement="top">
               <el-button circle size="small" @click="makeShare(a)"><el-icon><Share /></el-icon></el-button>
             </el-tooltip>
+            <el-tooltip :content="a.is_pinned ? '取消置顶' : '置顶（任何排序下保持最前）'" placement="top">
+              <el-button circle size="small" :type="a.is_pinned ? 'warning' : ''" @click="togglePin(a)"><el-icon><Top /></el-icon></el-button>
+            </el-tooltip>
             <el-tooltip content="删除" placement="top">
               <el-button circle size="small" type="danger" @click="remove(a)"><el-icon><Delete /></el-icon></el-button>
             </el-tooltip>
@@ -81,10 +90,7 @@
       <el-form label-width="52px">
         <el-form-item label="名称"><el-input v-model="folderDialog.name" placeholder="文件夹名" @keyup.enter="createFolder" /></el-form-item>
         <el-form-item label="位置">
-          <el-select v-model="folderDialog.parent" style="width:100%">
-            <el-option label="顶级目录" value="" />
-            <el-option v-for="f in folders" :key="f.id" :label="f.path" :value="f.id" />
-          </el-select>
+          <FolderTreePick v-model="folderDialog.parent" :folders="folders" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -100,9 +106,7 @@
       </template>
     </el-dialog>
     <el-dialog v-model="moveOpen" title="移动到文件夹" width="380px">
-      <el-select v-model="editFolder" placeholder="选择文件夹" style="width:100%">
-        <el-option v-for="f in folders" :key="f.id" :label="f.path" :value="f.id" />
-      </el-select>
+      <FolderTreePick v-model="editFolder" :folders="folders" />
       <template #footer>
         <el-button @click="moveOpen=false">取消</el-button>
         <el-button type="primary" @click="saveMove">移动</el-button>
@@ -128,13 +132,15 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CaretBottom, CaretRight, Delete, Edit, Files, Folder, FolderOpened, Plus, PriceTag, Rank, Share } from '@element-plus/icons-vue'
+import { CaretBottom, CaretRight, Delete, Edit, Files, Folder, FolderOpened, Plus, PriceTag, Rank, Share, Top } from '@element-plus/icons-vue'
+import FolderTreePick from '../components/FolderTreePick.vue'
 import { api, getFileToken } from '../api/client'
 
 const folders = ref<any[]>([])
 const assets = ref<any[]>([])
 const folderFilter = ref('')
 const q = ref(''), tags = ref(''), match = ref('all'), make = ref(''), uploader = ref('')
+const sort = ref('newest')
 const isoMin = ref<number | undefined>(undefined)
 const uploadTags = ref('')
 const fileInput = ref<HTMLInputElement|null>(null)
@@ -258,7 +264,16 @@ async function load() {
   if (make.value) p.make = make.value
   if (isoMin.value) p.iso_min = isoMin.value
   if (uploader.value) p.uploader = uploader.value
+  p.sort = sort.value
   assets.value = (await api.get('/api/assets', { params: p })).data
+}
+async function togglePin(a: any) {
+  try {
+    if (a.is_pinned) await api.delete(`/api/assets/${a.id}/pin`)
+    else await api.post(`/api/assets/${a.id}/pin`)
+    ElMessage.success(a.is_pinned ? '已取消置顶' : '已置顶')
+    await load()
+  } catch (e: any) { ElMessage.error(e.response?.data?.detail || '操作失败') }
 }
 interface DropEntry { file: File; rel: string }
 // 拖放状态：右侧面板遮罩 + 文件夹行精准投放高亮
@@ -413,6 +428,9 @@ onUnmounted(() => {
 .drop-mask-sub{margin-top:8px;font-size:13px;color:#7cc0f7}
 .filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
 .fn{font-weight:600;margin-top:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.meta{color:#888;font-size:12px}.ops{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+.card{position:relative}
+.pin-badge{position:absolute;top:10px;left:10px;z-index:2;background:linear-gradient(to bottom,#f6c453,#d9930d);color:#3a2703;
+  border-radius:4px;padding:2px 8px;font-size:12px;font-weight:800;box-shadow:0 2px 5px rgba(0,0,0,.55)}
 .hint{color:#888;font-size:12px}.share-row{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap}
 .share-block{margin:10px 0;padding:8px 10px;border-radius:8px;background:rgba(0,0,0,.28);border:1px solid rgba(0,0,0,.5)}
 .share-block .share-row{margin:0 0 6px}
