@@ -213,6 +213,12 @@ function stopElapsed() {
   if (elapsedTimer) clearInterval(elapsedTimer)
   elapsedTimer = null
 }
+/** 图片已在客户端显示出来后，步骤条全部消失（成功才清，失败保留定位） */
+async function hideStagesOnShown() {
+  if (!currentImages.value.length) return
+  await nextTick()
+  genStages.value = []
+}
 function cancelGenerate() {
   try { genAbort?.abort() } catch {}
   error.value = '已取消本次生成'
@@ -628,6 +634,7 @@ async function generate() {
       if (await pushHistory({ images: currentImages.value, usage: doneUsage, refIds, paramsSnapshot: rest })) dirty.value = false
       await autoStockGenerated(currentImages.value)
       setStage('saving', 'finish', '已保存')
+      await hideStagesOnShown()
     } else {
       // 非流式无 SSE：本地模拟阶段 + 已耗时，真实进度以服务器返回为准
       setStage('sent', 'finish'); setStage('received', 'finish', '服务器已收到请求（非流式，等待一次性返回）')
@@ -640,6 +647,7 @@ async function generate() {
       if (await pushHistory({ images: res.data, usage: res.usage, refIds, paramsSnapshot: rest })) dirty.value = false
       await autoStockGenerated(res.data)
       setStage('saving', 'finish', '已保存')
+      await hideStagesOnShown()
     }
   } catch (e: any) {
     if (e?.name === 'CanceledError' || e?.name === 'AbortError' || /cancel|abort|canceled/i.test(e?.message || '')) {
