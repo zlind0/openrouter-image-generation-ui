@@ -26,7 +26,7 @@
           <el-alert v-if="h.error" :title="h.error" type="error" show-icon :closable="false" />
           <div v-else class="result-grid">
             <div v-for="(t, i) in h.thumbs" :key="i" class="result-item">
-              <el-image :src="authUrl(t)" fit="cover" :preview-src-list="h.images.map(authUrl)" :initial-index="i" @click.stop />
+              <el-image :src="authUrl(t)" fit="cover" class="zoomable" @click.stop="openHistViewer(h, i)" />
             </div>
           </div>
           <div v-if="h.usage" class="cost">cost: {{ h.usage.cost ?? '—' }} · tokens: {{ h.usage.total_tokens }}</div>
@@ -87,7 +87,7 @@
       <el-input v-else-if="f.kind==='text'" v-model="paramValues[f.key]" placeholder="留空不发送" clearable />
       <div v-else-if="f.kind==='boolean'"><el-switch v-model="paramValues[f.key]" /></div>
     </div>
-    <div class="field"><label>参考图（可选，上传即自动存入素材库）</label>
+    <div class="field"><label>参考图（可选，上传即自动存入素材库，支持截图后直接 Ctrl+V 粘贴）</label>
       <div class="row" style="margin-bottom:8px">
         <el-button @click="pickFiles">选择文件</el-button>
         <el-button @click="sideTab='lib'">从素材库选择</el-button>
@@ -95,14 +95,27 @@
           <template #append><el-button @click="addUrl">添加</el-button></template>
         </el-input>
       </div>
-      <div class="refs"><div v-for="(r,i) in references" :key="i" class="ref" :title="r.name + (r.assetId ? '（已入库）' : '（未入库）')">
-        <el-image :src="refSrc(r)" fit="cover" :preview-src-list="refsPreview" :initial-index="i" />
-        <el-button class="ref-del" size="small" circle type="danger" @click="references.splice(i,1)">×</el-button>
+      <div v-if="!references.length" class="hint">小技巧：在本页任意位置粘贴剪贴板图片（截图 / 复制的图片文件），会自动加入此处并上传到「粘贴图片」目录</div>
+      <div class="refs"><div v-for="(r,i) in references" :key="i" class="ref" :class="{uploading: r.status==='uploading', failed: r.status==='error'}" :title="r.name + (r.assetId ? '（已入库）' : r.status==='uploading' ? `（上传中 ${r.progress ?? 0}%）` : r.status==='error' ? '（上传失败，可重试）' : '（未入库）')">
+        <el-image :src="refSrc(r)" fit="cover" class="zoomable" @click="openRefViewer(i)" />
+        <div v-if="r.status==='uploading'" class="ref-mask">
+          <el-progress type="circle" :width="44" :percentage="r.progress ?? 0" />
+          <span class="ref-tip">上传中…点 × 取消</span>
+        </div>
+        <div v-if="r.status==='error'" class="ref-mask err">
+          <span class="ref-tip">上传失败</span>
+          <el-button size="small" type="primary" @click.stop="retryRef(i)">重试</el-button>
+        </div>
+        <el-button class="ref-del" size="small" circle type="danger" @click="removeRef(i)">×</el-button>
       </div></div>
     </div>
-    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
-      <el-button type="primary" :loading="generating" :disabled="!canGenerate" @click="generate">{{ generating ? `生成中… ${elapsed}s` : '生成图片' }}</el-button>
-      <el-button v-if="generating" size="small" @click="cancelGenerate">取消</el-button>
+    <div class="gen-actions">
+      <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+        <el-button type="primary" :loading="generating" :disabled="!canGenerate" @click="generate">{{ genBtnText }}</el-button>
+        <el-button v-if="generating" size="small" @click="cancelGenerate">取消</el-button>
+        <span v-if="uploadingCount" class="hint">参考图上传中 {{ references.length - uploadingCount }}/{{ references.length }}，全部完成才可生成</span>
+      </div>
+      <el-progress v-if="uploadingCount" :percentage="uploadTotalProgress" :stroke-width="6" striped striped-flow :show-text="false" class="gen-progress" />
     </div>
     <div v-if="genStages.length" class="stages">
       <el-steps :active="stageActive" finish-status="success" process-status="process" direction="vertical">
@@ -113,7 +126,7 @@
     <div v-if="usageText" style="margin-top:8px">{{ usageText }}</div>
     <div v-if="currentImages.length" class="result-grid" style="margin-top:12px">
       <div v-for="(img,i) in currentImages" :key="i" class="result-item">
-        <el-image :src="imgDisplayUrl(img)" fit="cover" :preview-src-list="currentImages.map(imgDisplayUrl)" :initial-index="i" />
+        <el-image :src="imgDisplayUrl(img)" fit="cover" class="zoomable" @click="openResultViewer(i)" />
         <div style="display:flex;gap:6px;margin-top:6px">
           <el-button size="small" @click="saveImage(img,i)">下载</el-button>
           <el-button size="small" type="primary" @click="openStock(img)">入库</el-button>
@@ -137,17 +150,27 @@
         <el-button type="primary" :loading="stocking" @click="confirmStock">确认入库</el-button>
       </template>
     </el-dialog>
+    <!-- 统一全屏预览：teleport 到 body，不受 96px 小格/抽屉层级约束 -->
+    <teleport to="body">
+      <el-image-viewer v-if="refViewerShow" :url-list="refsPreview" :initial-index="refViewerIndex" :z-index="9999" infinite hide-on-click-modal @close="refViewerShow = false" />
+    </teleport>
+    <teleport to="body">
+      <el-image-viewer v-if="histViewerShow" :key="histViewerKey" :url-list="histViewerList" :initial-index="histViewerIndex" :z-index="9999" infinite hide-on-click-modal @close="histViewerShow = false" />
+    </teleport>
+    <teleport to="body">
+      <el-image-viewer v-if="resultViewerShow" :url-list="resultPreviewList" :initial-index="resultViewerIndex" :z-index="9999" infinite hide-on-click-modal @close="resultViewerShow = false" />
+    </teleport>
   </div>
   </div>
 </template>
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, getFileToken, orApi } from '../api/client'
 import { pickImages, saveImage as dl } from '../api/native'
 import { buildParamFields, cleanParams, type ParamField } from '../api/params'
 
-interface RefItem { kind: 'upload' | 'library' | 'url'; assetId: string | null; dataUrl: string; name: string; thumbUrl?: string }
+interface RefItem { kind: 'upload' | 'library' | 'url'; assetId: string | null; dataUrl: string; name: string; thumbUrl?: string; status?: 'uploading' | 'done' | 'error'; progress?: number; errMsg?: string; file?: Blob | null; abort?: AbortController | null; folderId?: string | null }
 interface GenImg { b64_json?: string; media_type?: string; url?: string }
 interface GenStage { key: string; label: string; status: 'wait' | 'process' | 'finish' | 'error'; detail?: string }
 
@@ -235,6 +258,30 @@ const stockImg = ref<GenImg|null>(null)
 const stockFolder = ref('')
 const stockTags = ref('')
 const GEN_FOLDER_NAME = '生成图片'
+const PASTE_FOLDER_NAME = '粘贴图片'
+let pasteFolderIdCache = ''
+function findPasteFolderId(): string {
+  const hit = folders.value.find((f: any) => f.path === PASTE_FOLDER_NAME || f.name === PASTE_FOLDER_NAME)
+  return hit ? hit.id : ''
+}
+/** 确保「粘贴图片」目录存在并返回其 id（不存在则创建；失败返回空串，调用方回落默认目录） */
+async function ensurePasteFolderId(): Promise<string> {
+  if (pasteFolderIdCache) return pasteFolderIdCache
+  let fid = findPasteFolderId()
+  if (!fid) {
+    try {
+      const r = await api.post('/api/assets/folders', { name: PASTE_FOLDER_NAME, parent_id: null })
+      fid = r.data?.id || ''
+      if (fid && r.data?.path) folders.value = [...folders.value, { id: fid, name: PASTE_FOLDER_NAME, parent_id: null, path: r.data.path }]
+    } catch (e: any) {
+      // 并发创建导致“已存在”时重新拉取列表再找一次
+      try { folders.value = (await api.get('/api/assets/folders')).data } catch {}
+      fid = findPasteFolderId()
+    }
+  }
+  if (fid) pasteFolderIdCache = fid
+  return fid
+}
 function findGenFolderId(): string {
   const hit = folders.value.find((f: any) => f.path === GEN_FOLDER_NAME || f.name === GEN_FOLDER_NAME)
   return hit ? hit.id : ''
@@ -318,16 +365,18 @@ watch([prompt, selectedId, providerChoice, references], () => scheduleDraftSave(
 watch(paramValues, () => scheduleDraftSave(), { deep: true })
 
 function serializableRefs(): any[] {
-  return references.value.map((r) => ({
-    kind: r.kind,
-    assetId: r.assetId,
-    name: r.name,
-    thumbUrl: r.thumbUrl || '',
-    // data: URL 太大不进草稿（已入库的用 assetId 恢复；http 外链原样保留）
-    dataUrl: r.dataUrl.startsWith('data:')
-      ? (r.dataUrl.length > 200_000 ? '' : r.dataUrl)
-      : r.dataUrl,
-  }))
+  return references.value
+    .filter((r) => r.status !== 'uploading' && !r.dataUrl.startsWith('blob:'))
+    .map((r) => ({
+      kind: r.kind,
+      assetId: r.assetId,
+      name: r.name,
+      thumbUrl: r.thumbUrl || '',
+      // data: URL 太大不进草稿（已入库的用 assetId 恢复；http 外链原样保留）
+      dataUrl: r.dataUrl.startsWith('data:')
+        ? (r.dataUrl.length > 200_000 ? '' : r.dataUrl)
+        : r.dataUrl,
+    }))
 }
 async function saveDraft() {
   try {
@@ -358,6 +407,8 @@ async function applyDraft() {
           dataUrl: r.dataUrl || '',
           name: r.name || '参考图',
           thumbUrl: r.thumbUrl || '',
+          status: 'done' as const,
+          progress: 100,
         }))
     }
     if (d.model) {
@@ -396,8 +447,48 @@ async function snapshotWorkspace() {
   } catch (e) { console.warn('快照保存失败', e) }
 }
 
-const canGenerate = computed(() => !!selectedId.value && !!prompt.value.trim() && !generating.value)
+const uploadingCount = computed(() => references.value.filter((r) => r.status === 'uploading').length)
+const uploadTotalProgress = computed(() => {
+  const ups = references.value.filter((r) => r.status === 'uploading' || (r.kind === 'upload' && r.status === 'error'))
+  if (!ups.length) return 100
+  const uploading = references.value.filter((r) => r.status === 'uploading')
+  if (!uploading.length) return 100
+  return Math.round(uploading.reduce((s, r) => s + (r.progress ?? 0), 0) / uploading.length)
+})
+const canGenerate = computed(() => !!selectedId.value && !!prompt.value.trim() && !generating.value && uploadingCount.value === 0)
+const genBtnText = computed(() => {
+  if (generating.value) return `生成中… ${elapsed.value}s`
+  if (uploadingCount.value) return `上传中 ${uploadTotalProgress.value}%（${references.value.length - uploadingCount.value}/${references.value.length}）`
+  return '生成图片'
+})
 const refsPreview = computed(() => references.value.map(refPreviewSrc))
+
+/* ---- 统一全屏预览（参考图 / 历史 / 生成结果） ---- */
+const refViewerShow = ref(false)
+const refViewerIndex = ref(0)
+async function openRefViewer(i: number) {
+  await ensureFileToken()
+  refViewerIndex.value = i
+  refViewerShow.value = true
+}
+const histViewerShow = ref(false)
+const histViewerList = ref<string[]>([])
+const histViewerIndex = ref(0)
+const histViewerKey = ref(0)
+async function openHistViewer(h: any, i: number) {
+  await ensureFileToken()
+  histViewerList.value = (h.images ?? []).map(authUrl)
+  histViewerIndex.value = i
+  histViewerKey.value++
+  histViewerShow.value = true
+}
+const resultViewerShow = ref(false)
+const resultViewerIndex = ref(0)
+const resultPreviewList = computed(() => currentImages.value.map(imgDisplayUrl))
+function openResultViewer(i: number) {
+  resultViewerIndex.value = i
+  resultViewerShow.value = true
+}
 
 async function loadModels() {
   // 初始只读服务端缓存（快；超 24h 服务端自动回源）；手动刷新走 refreshModels/refreshBalance
@@ -490,22 +581,29 @@ function refPreviewSrc(r: RefItem): string {
   if (r.assetId) return authUrl(`/api/assets/${r.assetId}/file`)
   return r.dataUrl
 }
-async function stockRefAsset(blob: Blob, name: string): Promise<string | null> {
+async function stockRefAsset(blob: Blob, name: string, opts?: { onProgress?: (pct: number) => void; signal?: AbortSignal; folderId?: string | null }): Promise<string | null> {
   try {
     const fd = new FormData()
     fd.append('files', blob, name)
-    const r = await api.post('/api/assets/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+    if (opts?.folderId) fd.append('folder_id', opts.folderId) // 不传则后端默认归入「上传素材」
+    const r = await api.post('/api/assets/upload', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      signal: opts?.signal,
+      onUploadProgress: (e: any) => {
+        if (!e || !e.total) return
+        try { opts?.onProgress?.(Math.round((e.loaded * 100) / e.total)) } catch {}
+      },
+    })
     const saved = r.data.assets ?? []
     if (saved.length) {
       ElMessage.success(`已自动存入素材库：${name}`)
       return saved[0].id
     }
     const skipped = r.data.skipped ?? []
-    ElMessage.warning(skipped[0]?.reason || '参考图入库被跳过')
-    return null
+    throw new Error(skipped[0]?.reason || '参考图入库被跳过')
   } catch (e: any) {
-    ElMessage.warning(`参考图自动入库失败（仍可用于本次生成）：${e.response?.data?.detail || e.message}`)
-    return null
+    if (e?.name === 'CanceledError' || e?.name === 'AbortError' || /cancel|abort|canceled/i.test(e?.message || '')) throw e
+    throw new Error(e.response?.data?.detail || e.message || '上传失败')
   }
 }
 function blobToDataUrl(blob: Blob): Promise<string> {
@@ -516,14 +614,139 @@ function blobToDataUrl(blob: Blob): Promise<string> {
     fr.readAsDataURL(blob)
   })
 }
+function extOf(blob: Blob, fallbackName = ''): string {
+  const t = (blob.type || '').toLowerCase()
+  if (t.includes('jpeg') || t.includes('jpg')) return '.jpg'
+  if (t.includes('webp')) return '.webp'
+  if (t.includes('gif')) return '.gif'
+  if (t.includes('bmp')) return '.bmp'
+  if (t.includes('svg')) return '.svg'
+  if (t.includes('avif')) return '.avif'
+  if (t.includes('heic') || t.includes('heif')) return '.heic'
+  const m = fallbackName.match(/\.[a-z0-9]+$/i)
+  return m ? m[0] : '.png'
+}
+/** 带占位缩略图 + 进度 + 可取消的统一入库入口（选择文件 / 粘贴 / URL 共用；paste 为 true 时进「粘贴图片」目录） */
+async function addBlobRefs(blobs: Array<{ blob: Blob; name: string }>, opts?: { paste?: boolean }) {
+  const folderId = opts?.paste ? await ensurePasteFolderId().catch(() => '') : ''
+  for (const { blob, name } of blobs) {
+    const abort = new AbortController()
+    const preview = URL.createObjectURL(blob)
+    const item: RefItem = { kind: 'upload', assetId: null, dataUrl: preview, name, status: 'uploading', progress: 0, file: blob, abort, folderId: folderId || null }
+    references.value.push(item)
+    // 本地 dataUrl（用于生成请求）与上传并行做，任一先完成都不阻塞另一方
+    blobToDataUrl(blob).then((d) => {
+      const i = references.value.indexOf(item)
+      if (i >= 0 && references.value[i].dataUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(references.value[i].dataUrl)
+        references.value[i].dataUrl = d
+      }
+    }).catch(() => {})
+    try {
+      const assetId = await stockRefAsset(blob, name, {
+        signal: abort.signal,
+        folderId: item.folderId,
+        // 注意：必须经 references.value[i] 改（响应式代理），直接改 item（原始对象）不会触发刷新
+        onProgress: (pct) => {
+          const pi = references.value.indexOf(item)
+          if (pi >= 0) references.value[pi].progress = pct
+        },
+      })
+      const i = references.value.indexOf(item)
+      if (i < 0) continue // 上传期间已被删除
+      const done = references.value[i]
+      done.progress = 100
+      done.assetId = assetId
+      done.status = 'done'
+      done.file = null
+      done.abort = null
+    } catch (e: any) {
+      const i = references.value.indexOf(item)
+      if (i < 0) continue // 用户点了 × 取消，已移除
+      if (e?.name === 'CanceledError' || e?.name === 'AbortError' || /cancel|abort|canceled/i.test(e?.message || '')) {
+        // 取消走 removeRef 的移除逻辑，这里兜底
+        references.value.splice(i, 1)
+        continue
+      }
+      const failed = references.value[i]
+      failed.status = 'error'
+      failed.errMsg = e.message || '上传失败'
+      failed.abort = null
+      ElMessage.warning(`参考图自动入库失败（仍可重试）：${failed.errMsg}`)
+    }
+  }
+}
+function removeRef(i: number) {
+  const r = references.value[i]
+  if (!r) return
+  try { r.abort?.abort() } catch {}
+  if (r.dataUrl.startsWith('blob:')) {
+    try { URL.revokeObjectURL(r.dataUrl) } catch {}
+  }
+  references.value.splice(i, 1)
+}
+async function retryRef(i: number) {
+  const r = references.value[i]
+  if (!r || !r.file) {
+    ElMessage.warning('本地图片数据已丢失，请重新选择/粘贴')
+    return
+  }
+  const abort = new AbortController()
+  r.status = 'uploading'
+  r.progress = 0
+  r.errMsg = ''
+  r.abort = abort
+  try {
+    const assetId = await stockRefAsset(r.file, r.name, {
+      signal: abort.signal,
+      folderId: r.folderId,
+      onProgress: (pct) => { r.progress = pct },
+    })
+    r.progress = 100
+    r.assetId = assetId
+    r.status = 'done'
+    r.file = null
+    r.abort = null
+  } catch (e: any) {
+    if (e?.name === 'CanceledError' || e?.name === 'AbortError' || /cancel|abort|canceled/i.test(e?.message || '')) return
+    r.status = 'error'
+    r.errMsg = e.message || '上传失败'
+    r.abort = null
+    ElMessage.warning(`重试失败：${r.errMsg}`)
+  }
+}
+/** 全页粘贴：有图片就拦截进参考图，纯文本放行不影响 Prompt 输入 */
+function onPaste(e: ClipboardEvent) {
+  const dt = e.clipboardData
+  if (!dt) return
+  const files: File[] = []
+  if (dt.files && dt.files.length) {
+    for (const f of Array.from(dt.files)) {
+      if (f.type && f.type.startsWith('image/')) files.push(f)
+    }
+  }
+  if (!files.length && dt.items) {
+    for (const it of Array.from(dt.items)) {
+      if (it.type && it.type.startsWith('image/')) {
+        const f = it.getAsFile()
+        if (f) files.push(f)
+      }
+    }
+  }
+  if (!files.length) return
+  e.preventDefault()
+  const ts = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const stamp = `${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}`
+  void addBlobRefs(files.map((f, i) => ({
+    blob: f,
+    name: f.name && /\.[a-z0-9]+$/i.test(f.name) ? f.name : `pasted-${stamp}-${i}${extOf(f, f.name)}`,
+  })), { paste: true })
+}
 async function pickFiles() {
   const picked = await pickImages()
-  for (const p of picked) {
-    try {
-      const assetId = await stockRefAsset(p.file, p.name)
-      references.value.push({ kind: 'upload', assetId, dataUrl: p.dataUrl, name: p.name })
-    } catch (e: any) { ElMessage.error(e.message || '添加参考图失败') }
-  }
+  if (!picked.length) return
+  await addBlobRefs(picked.map((p) => ({ blob: p.file, name: p.name })))
 }
 async function addUrl() {
   const u = imageUrl.value.trim(); if (!u) return; imageUrl.value = ''
@@ -531,13 +754,12 @@ async function addUrl() {
     const res = await fetch(u)
     if (!res.ok) throw new Error(`拉图失败 (${res.status})`)
     const blob = await res.blob()
-    const name = u.slice(0, 40) || 'url-image'
-    const assetId = await stockRefAsset(blob, name)
-    references.value.push({ kind: 'upload', assetId, dataUrl: await blobToDataUrl(blob), name })
+    const name = (u.split('/').pop() || 'url-image').slice(0, 60)
+    await addBlobRefs([{ blob, name }])
   } catch (e: any) {
     // 直连拉取失败（如跨域）：保留原 URL 用于本次生成，但无法入库
     ElMessage.warning(`URL 拉取失败，已保留原地址（未入库）：${e.message}`)
-    references.value.push({ kind: 'url', assetId: null, dataUrl: u, name: u.slice(0, 40) })
+    references.value.push({ kind: 'url', assetId: null, dataUrl: u, name: u.slice(0, 40), status: 'done', progress: 100 })
   }
 }
 /* 左侧栏 tab：历史记录 / 素材库（v-show 切换，DOM 常驻，滚动/搜索/勾选状态保留） */
@@ -561,12 +783,15 @@ async function loadLibAssets() {
 /* 素材库点击即加入/移除参考图：只存 assetId + thumb_url，不下载原图 */
 function toggleLibRef(a: any) {
   const i = references.value.findIndex((r) => r.assetId === a.id)
-  if (i >= 0) references.value.splice(i, 1)
-  else references.value.push({ kind: 'library', assetId: a.id, dataUrl: '', thumbUrl: a.thumb_url || '', name: a.filename })
+  if (i >= 0) removeRef(i)
+  else references.value.push({ kind: 'library', assetId: a.id, dataUrl: '', thumbUrl: a.thumb_url || '', name: a.filename, status: 'done', progress: 100 })
 }
 
 async function generate() {
-  if (!canGenerate.value) return
+  if (!canGenerate.value) {
+    if (uploadingCount.value) ElMessage.warning(`参考图还有 ${uploadingCount.value} 张上传中，完成后才可生成`)
+    return
+  }
   generating.value = true; error.value = ''; usageText.value = ''; currentImages.value = []
   resetStages(); startElapsed()
   genAbort = new AbortController()
@@ -578,7 +803,8 @@ async function generate() {
   const clientRefs: any[] = []
   for (const r of references.value) {
     if (r.kind === 'library') continue
-    if (!r.dataUrl) continue
+    if (r.status === 'uploading') continue
+    if (!r.dataUrl || r.dataUrl.startsWith('blob:')) continue
     clientRefs.push({ type: 'image_url' as const, image_url: { url: r.dataUrl } })
   }
   const body = {
@@ -695,7 +921,7 @@ async function restoreHistory(h: any) {
   suppressDirty = true
   try {
     prompt.value = h.prompt
-    references.value = (h.references ?? []).map((r: any) => ({ kind: 'library' as const, assetId: r.id, dataUrl: '', thumbUrl: r.thumb_url || '', name: r.filename }))
+    references.value = (h.references ?? []).map((r: any) => ({ kind: 'library' as const, assetId: r.id, dataUrl: '', thumbUrl: r.thumb_url || '', name: r.filename, status: 'done' as const, progress: 100 }))
     currentImages.value = (h.images ?? []).map((u: string) => ({ url: authUrl(u) }))
     error.value = h.error ?? ''
     usageText.value = h.usage ? `cost: $${h.usage.cost ?? '?'} · tokens: ${h.usage.total_tokens ?? '?'}` : ''
@@ -773,6 +999,7 @@ async function confirmStock() {
   finally { stocking.value = false }
 }
 onMounted(async () => {
+  document.addEventListener('paste', onPaste)
   await ensureFileToken()
   await loadModels()
   await applyDraft()
@@ -780,13 +1007,24 @@ onMounted(async () => {
   await loadHistory()
   await loadLibAssets()
 })
+onUnmounted(() => {
+  document.removeEventListener('paste', onPaste)
+})
 </script>
 <style scoped>
 .gen-wrap{display:grid;grid-template-columns:minmax(300px,1fr) minmax(0,2fr);gap:16px;max-width:1400px;width:100%;margin:0 auto;padding:16px;align-items:start}
 .gen{min-width:0;order:2}.side{min-width:0;order:1}
 @media (max-width:1100px){.gen-wrap{grid-template-columns:1fr}.gen{order:1}}
 .topbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
-.field{margin:12px 0}.kv{color:#888;font-size:12px}.refs{display:flex;gap:8px;flex-wrap:wrap}.ref{position:relative;width:96px;height:96px}.ref .el-image{width:100%;height:100%}
+.field{margin:12px 0}.kv{color:#888;font-size:12px}.refs{display:flex;gap:8px;flex-wrap:wrap}.ref{position:relative;width:96px;height:96px;border-radius:8px;overflow:hidden}.ref .el-image{width:100%;height:100%}
+.ref-del{position:absolute;top:2px;right:2px;z-index:3}
+.ref-mask{position:absolute;inset:0;z-index:2;display:flex;flex-direction:column;gap:4px;align-items:center;justify-content:center;background:rgba(0,0,0,.55);padding:4px}
+.ref-mask.err{background:rgba(120,20,20,.65)}
+.ref-tip{color:#fff;font-size:11px;text-align:center;line-height:1.3}
+.ref.uploading{outline:2px solid var(--el-color-primary)}
+.ref.failed{outline:2px solid var(--el-color-danger)}
+.gen-actions{max-width:520px}.gen-progress{margin-top:8px}
+.zoomable{cursor:zoom-in}
 .stages{margin:12px 0;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,.28);border:1px solid rgba(0,0,0,.5)}
 .result-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.result-item .el-image{width:100%;height:220px}
 .side .result-grid{grid-template-columns:1fr 1fr}.side .result-item .el-image{height:110px}
