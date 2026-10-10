@@ -28,8 +28,9 @@ from ..services.image_util import (
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
 
-# 默认库：未指定文件夹的上传/入库一律归入此处
+# 默认库：未指定文件夹的上传一律归入「上传素材」；生成图入库默认归入「生成图片」
 DEFAULT_UPLOAD_FOLDER = "上传素材"
+DEFAULT_GENERATED_FOLDER = "生成图片"
 
 
 def ensure_default_folder(db: Session) -> Folder:
@@ -37,6 +38,17 @@ def ensure_default_folder(db: Session) -> Folder:
     f = db.query(Folder).filter(Folder.parent_id.is_(None), Folder.name == DEFAULT_UPLOAD_FOLDER).first()
     if not f:
         f = Folder(name=DEFAULT_UPLOAD_FOLDER, parent_id=None, path=DEFAULT_UPLOAD_FOLDER, created_by="system")
+        db.add(f)
+        db.commit()
+        db.refresh(f)
+    return f
+
+
+def ensure_generated_folder(db: Session) -> Folder:
+    """获取或创建顶级「生成图片」文件夹（供生成结果自动入库）"""
+    f = db.query(Folder).filter(Folder.parent_id.is_(None), Folder.name == DEFAULT_GENERATED_FOLDER).first()
+    if not f:
+        f = Folder(name=DEFAULT_GENERATED_FOLDER, parent_id=None, path=DEFAULT_GENERATED_FOLDER, created_by="system")
         db.add(f)
         db.commit()
         db.refresh(f)
@@ -320,8 +332,8 @@ def from_generation(body: FromGenIn, user: User = Depends(get_current_user), db:
         raw = base64.b64decode(body.b64.split(",")[-1])
     except Exception:
         raise HTTPException(400, "b64 非法")
-    # 点击入库才调到这里；未选文件夹则默认进入「上传素材」库
-    fid = body.folder_id or ensure_default_folder(db).id
+    # 生成图入库：未选文件夹则默认进入「生成图片」库
+    fid = body.folder_id or ensure_generated_folder(db).id
     a = _save_asset_file(db, user, body.filename, raw, fid, body.tags, source="generate", prompt=body.prompt)
     return _asset_out(db, a)
 

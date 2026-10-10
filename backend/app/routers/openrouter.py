@@ -5,7 +5,9 @@
 - POST /refresh 接口强制回源，供前端手动刷新按钮调用；
 - 管理员轮换 Key 时整组缓存失效。
 """
+import base64
 import json
+import os
 from datetime import datetime, timezone
 
 import httpx
@@ -17,7 +19,8 @@ from sqlalchemy.orm import Session
 from ..core.config import settings
 from ..db.session import get_db
 from ..deps import get_current_user
-from ..models import Generation, ServerCache, User
+from ..models import Asset, Generation, ServerCache, User
+from ..services.image_util import sniff_mime
 from .admin import load_openrouter_key_plaintext
 
 router = APIRouter(prefix="/api/openrouter", tags=["openrouter"])
@@ -131,12 +134,66 @@ class GenIn(BaseModel):
     save_to_library: bool = False
     folder_id: str | None = None
     params: dict = {}
+    # 素材库参考图：服务端自主读盘组装，不再经客户端下载回传
+    reference_ids: list[str] = []
+
+
+MAX_REF_BYTES = 20 * 1024 * 1024
+MAX_REFS = 10
+
+
+def _asset_to_data_url(db: Session, aid: str) -> str:
+    a = db.get(Asset, aid)
+    if not a:
+        raise HTTPException(status_code=404, detail=f"参考素材不存在：{aid}")
+    abs_path = os.path.join(settings.data_dir, a.stored_path)
+    if not os.path.isfile(abs_path):
+        raise HTTPException(status_code=404, detail=f"参考素材文件缺失：{a.filename}")
+    size = os.path.getsize(abs_path)
+    if size > MAX_REF_BYTES:
+        raise HTTPException(status_code=400, detail=f"参考图过大（限20MB）：{a.filename}")
+    with open(abs_path, "rb") as f:
+        raw = f.read()
+    mime = a.mime or sniff_mime(abs_path, a.filename) or "image/png"
+    # SVG 等文本格式 OpenRouter 可能不支持，转 dataURL 仍原样透传，由上游报错
+    b64 = base64.b64encode(raw).decode()
+    return f"data:{mime};base64,{b64}"
+
+
+def _build_server_refs(db: Session, reference_ids: list[str]) -> list[dict]:
+    ids = (reference_ids or [])[:MAX_REFS]
+    out = []
+    for aid in ids:
+        url = _asset_to_data_url(db, aid)
+        out.append({"type": "image_url", "image_url": {"url": url}})
+    return out
+
+
+def _merge_input_refs(params: dict | None, server_refs: list[dict]) -> list[dict] | None:
+    client_refs = []
+    if isinstance(params, dict):
+        v = params.get("input_references")
+        if isinstance(v, list):
+            client_refs = v
+    merged = [*server_refs, *client_refs]
+    return merged or None
+
+
+def _stage(stage: str, message: str = "", **extra) -> str:
+    payload = {"type": "stage", "stage": stage, "message": message, **extra}
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 @router.post("/images")
 def proxy_generate(body: GenIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     key = load_openrouter_key_plaintext(db)
+    server_refs = _build_server_refs(db, body.reference_ids)
+    merged = _merge_input_refs(body.params, server_refs)
     payload = {"model": body.model, "prompt": body.prompt, "user": user.id, **(body.params or {})}
+    if merged is not None:
+        payload["input_references"] = merged
+    else:
+        payload.pop("input_references", None)
     try:
         r = httpx.post(f"{settings.openrouter_base}/images", headers=_h(key), json=payload, timeout=300)
     except Exception as e:
@@ -158,14 +215,29 @@ def proxy_generate(body: GenIn, user: User = Depends(get_current_user), db: Sess
 @router.post("/images/stream")
 def proxy_generate_stream(body: GenIn, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     key = load_openrouter_key_plaintext(db)
+    # 参考图在进入流之前就地组装：失败直接 4xx，不进入 SSE
+    server_refs = _build_server_refs(db, body.reference_ids)
+    merged = _merge_input_refs(body.params, server_refs)
     payload = {"model": body.model, "prompt": body.prompt, "user": user.id, "stream": True, **(body.params or {})}
+    if merged is not None:
+        payload["input_references"] = merged
+    else:
+        payload.pop("input_references", None)
+    ref_count = len(server_refs) + (len(merged or []) - len(server_refs))
 
     def gen():
         try:
+            yield _stage("received", "服务器已收到请求")
+            yield _stage("assembling", f"服务端组装参考图（库 {len(server_refs)} 张，客户端 {ref_count - len(server_refs)} 张），无需客户端回传",
+                         server_refs=len(server_refs), client_refs=ref_count - len(server_refs))
+            yield _stage("forwarding", "请求发送中：正在转发给 OpenRouter")
             with httpx.stream("POST", f"{settings.openrouter_base}/images", headers=_h(key), json=payload, timeout=300) as r:
                 if r.status_code != 200:
+                    yield _stage("error", f"上游拒绝 ({r.status_code})")
                     yield f"data: {json.dumps({'type': 'error', 'error': {'message': r.read().decode()[:500]}})}\n\n"
                     return
+                yield _stage("upstream_connected", "OpenRouter 已接受请求，生成中")
+                first_chunk = True
                 for line in r.iter_lines():
                     if line is None:
                         continue
@@ -174,12 +246,25 @@ def proxy_generate_stream(body: GenIn, request: Request, user: User = Depends(ge
                         continue
                     if t.startswith(":"):
                         continue
+                    if first_chunk:
+                        first_chunk = False
+                        yield _stage("generating", "OpenRouter 生成中：已收到首包回传")
                     if t.startswith("data:"):
+                        p = t[5:].strip()
+                        # 透传前识别完成包，提前发 downloading 阶段
+                        try:
+                            if p and p != "[DONE]":
+                                ev = json.loads(p)
+                                if isinstance(ev, dict) and ev.get("type") == "image_generation.completed":
+                                    yield _stage("downloading", "生成完成，图片回传/下载中")
+                        except Exception:
+                            pass
                         yield t + "\n\n"
                     else:
                         yield f"data: {t}\n\n"
                 yield "data: [DONE]\n\n"
         except Exception as e:
+            yield _stage("error", str(e)[:500])
             yield f"data: {json.dumps({'type': 'error', 'error': {'message': str(e)}})}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")

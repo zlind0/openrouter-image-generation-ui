@@ -8,7 +8,7 @@ from .core.config import settings
 from .db.session import SessionLocal, init_db
 from .models import AuditLog, User
 from .core.security import hash_password
-from .routers import admin, assets, auth, history, openrouter, shares
+from .routers import admin, assets, auth, history, openrouter, shares, workspace
 
 app = FastAPI(title=settings.app_name)
 
@@ -26,6 +26,7 @@ app.include_router(openrouter.router)
 app.include_router(assets.router)
 app.include_router(shares.router)
 app.include_router(history.router)
+app.include_router(workspace.router)
 
 
 @app.on_event("startup")
@@ -35,11 +36,12 @@ def startup():
     # seed 单管理员（仅首次）
     db = SessionLocal()
     try:
-        # 预置默认库「上传素材」，上传/入库无文件夹时归入此处
+        # 预置默认库「上传素材」与「生成图片」，上传/生成入库无文件夹时分别归入
         try:
-            from .routers.assets import ensure_default_folder
+            from .routers.assets import ensure_default_folder, ensure_generated_folder
 
             ensure_default_folder(db)
+            ensure_generated_folder(db)
         except Exception as e:
             print(f"[WARN] 默认文件夹预置失败: {e}")
         if not db.query(User).filter(User.is_admin.is_(True)).first():

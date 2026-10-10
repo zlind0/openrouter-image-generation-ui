@@ -22,7 +22,7 @@
               <el-button size="small" type="danger" circle @click.stop="deleteHistory(h.id)">×</el-button>
             </div>
           </template>
-          <div class="p">{{ h.prompt }}</div>
+          <div class="p">{{ h.prompt }} <el-tag v-if="!h.error && !(h.images && h.images.length)" type="info" size="small">草稿快照</el-tag></div>
           <el-alert v-if="h.error" :title="h.error" type="error" show-icon :closable="false" />
           <div v-else class="result-grid">
             <div v-for="(t, i) in h.thumbs" :key="i" class="result-item">
@@ -100,7 +100,15 @@
         <el-button class="ref-del" size="small" circle type="danger" @click="references.splice(i,1)">×</el-button>
       </div></div>
     </div>
-    <el-button type="primary" :loading="generating" :disabled="!canGenerate" @click="generate">{{ generating?'生成中…':'生成图片' }}</el-button>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:4px">
+      <el-button type="primary" :loading="generating" :disabled="!canGenerate" @click="generate">{{ generating ? `生成中… ${elapsed}s` : '生成图片' }}</el-button>
+      <el-button v-if="generating" size="small" @click="cancelGenerate">取消</el-button>
+    </div>
+    <div v-if="genStages.length" class="stages">
+      <el-steps :active="stageActive" finish-status="success" process-status="process" direction="vertical">
+        <el-step v-for="s in genStages" :key="s.key" :title="s.label" :status="s.status" :description="s.detail" />
+      </el-steps>
+    </div>
     <el-alert v-if="error" :title="error" type="error" :closable="false" style="margin-top:8px" />
     <div v-if="usageText" style="margin-top:8px">{{ usageText }}</div>
     <div v-if="currentImages.length" class="result-grid" style="margin-top:12px">
@@ -118,7 +126,7 @@
           <el-select v-model="stockFolder" placeholder="选择文件夹" style="width:100%">
             <el-option v-for="f in folders" :key="f.id" :label="f.path" :value="f.id" />
           </el-select>
-          <div class="hint">默认进入「上传素材」库</div>
+          <div class="hint">默认进入「生成图片」库（生成成功会自动推送到该目录）</div>
         </el-form-item>
         <el-form-item label="标签">
           <el-input v-model="stockTags" placeholder="标签，逗号分隔" />
@@ -133,14 +141,15 @@
   </div>
 </template>
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, getFileToken, orApi } from '../api/client'
 import { pickImages, saveImage as dl } from '../api/native'
 import { buildParamFields, cleanParams, type ParamField } from '../api/params'
 
-interface RefItem { kind: 'upload' | 'library' | 'url'; assetId: string | null; dataUrl: string; name: string }
+interface RefItem { kind: 'upload' | 'library' | 'url'; assetId: string | null; dataUrl: string; name: string; thumbUrl?: string }
 interface GenImg { b64_json?: string; media_type?: string; url?: string }
+interface GenStage { key: string; label: string; status: 'wait' | 'process' | 'finish' | 'error'; detail?: string }
 
 const models = ref<any[]>([])
 const endpoints = ref<any[]>([])
@@ -157,14 +166,121 @@ const generating = ref(false)
 const error = ref('')
 const balanceText = ref('')
 const usageText = ref('')
+const genStages = ref<GenStage[]>([])
+const elapsed = ref(0)
+let elapsedTimer: any = null
+let genAbort: AbortController | null = null
+const stageActive = computed(() => {
+  const i = genStages.value.findIndex((s) => s.status === 'process' || s.status === 'error')
+  if (i >= 0) return i
+  const done = genStages.value.filter((s) => s.status === 'finish').length
+  return done
+})
+function resetStages() {
+  genStages.value = [
+    { key: 'sent', label: '请求已发出', status: 'wait' },
+    { key: 'received', label: '服务器已收到请求', status: 'wait' },
+    { key: 'forwarding', label: '请求发送中：转发给 OpenRouter', status: 'wait' },
+    { key: 'generating', label: 'OpenRouter 生成中', status: 'wait' },
+    { key: 'downloading', label: '图片回传 / 下载中', status: 'wait' },
+    { key: 'saving', label: '历史 + 素材库保存中', status: 'wait' },
+  ]
+  elapsed.value = 0
+}
+function setStage(key: string, status: GenStage['status'], detail = '') {
+  const s = genStages.value.find((x) => x.key === key)
+  if (!s) return
+  s.status = status
+  if (detail) s.detail = detail
+  // 前序阶段自动标 finish，保证步骤条连续
+  const order = ['sent', 'received', 'forwarding', 'generating', 'downloading', 'saving']
+  const idx = order.indexOf(key)
+  if (status === 'process' || status === 'finish') {
+    for (let i = 0; i < idx; i++) {
+      const p = genStages.value.find((x) => x.key === order[i])
+      if (p && p.status === 'wait') p.status = 'finish'
+    }
+  }
+  if (status === 'error') {
+    for (const x of genStages.value) if (x.status === 'process') x.status = 'error'
+  }
+}
+function startElapsed() {
+  stopElapsed()
+  elapsedTimer = setInterval(() => { elapsed.value++ }, 1000)
+}
+function stopElapsed() {
+  if (elapsedTimer) clearInterval(elapsedTimer)
+  elapsedTimer = null
+}
+function cancelGenerate() {
+  try { genAbort?.abort() } catch {}
+  error.value = '已取消本次生成'
+  setStage('generating', 'error', '用户取消')
+  generating.value = false
+  stopElapsed()
+}
 const currentImages = ref<GenImg[]>([])
 const folders = ref<any[]>([])
-// 点击入库弹窗状态（生成结果默认不入库，只能逐张手动入库）
+// 生成结果自动入库到「生成图片」；弹窗手动入库默认也预选该目录
 const stockOpen = ref(false)
 const stocking = ref(false)
 const stockImg = ref<GenImg|null>(null)
 const stockFolder = ref('')
 const stockTags = ref('')
+const GEN_FOLDER_NAME = '生成图片'
+function findGenFolderId(): string {
+  const hit = folders.value.find((f: any) => f.path === GEN_FOLDER_NAME || f.name === GEN_FOLDER_NAME)
+  return hit ? hit.id : ''
+}
+/** 确保「生成图片」目录存在并返回其 id（不存在则创建） */
+async function ensureGenFolderId(): Promise<string> {
+  let fid = findGenFolderId()
+  if (fid) return fid
+  try {
+    const r = await api.post('/api/assets/folders', { name: GEN_FOLDER_NAME, parent_id: null })
+    fid = r.data?.id || ''
+  } catch (e: any) {
+    // 并发创建导致“已存在”时重新拉取列表再找一次
+    try { folders.value = (await api.get('/api/assets/folders')).data } catch {}
+    fid = findGenFolderId()
+  }
+  if (!fid) {
+    try { folders.value = (await api.get('/api/assets/folders')).data } catch {}
+    fid = findGenFolderId()
+  }
+  return fid
+}
+/** 生成成功后自动推送全部结果图到素材库「生成图片」目录 */
+async function autoStockGenerated(images: GenImg[]) {
+  if (!images.length) return
+  try {
+    const fid = await ensureGenFolderId()
+    const ts = Date.now()
+    let ok = 0
+    for (let i = 0; i < images.length; i++) {
+      try {
+        const { b64, mime } = await imgToB64(images[i])
+        const ext = mime.includes('jpeg') || mime.includes('jpg') ? '.jpg' : mime.includes('webp') ? '.webp' : '.png'
+        await api.post('/api/assets/from-generation', {
+          b64,
+          mime,
+          filename: `gen-${ts}-${i}${ext}`,
+          folder_id: fid || null, // 空则后端默认归入「生成图片」
+          tags: [],
+          prompt: prompt.value.trim(),
+        })
+        ok++
+      } catch (e) { console.warn('单张自动入库失败', e) }
+    }
+    if (ok) {
+      ElMessage.success(`已自动存入素材库「${GEN_FOLDER_NAME}」（${ok} 张）`)
+      try { await loadLibAssets() } catch {}
+    } else {
+      ElMessage.warning('生成成功，但自动入库素材库失败，可点击「入库」手动重试')
+    }
+  } catch (e) { console.warn('自动入库失败', e) }
+}
 // 文件令牌（<img> 鉴权）
 const ftoken = ref('')
 async function ensureFileToken(force = false) {
@@ -175,8 +291,107 @@ function authUrl(u: string): string {
   return ftoken.value ? u + (u.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(ftoken.value) : u
 }
 
+/* ---- 工作区草稿：存服务器，防刷新丢失；点历史还原前先快照成新条目防覆盖 ---- */
+const dirty = ref(false) // 用户是否改过工作区（生成/还原成功后清零）
+let suppressDirty = false
+let draftReady = false
+function markDirty() {
+  if (!suppressDirty && draftReady) dirty.value = true
+}
+watch([prompt, selectedId, providerChoice], () => markDirty())
+watch(paramValues, () => markDirty(), { deep: true })
+watch(references, () => markDirty(), { deep: true })
+
+let draftTimer: any = null
+function scheduleDraftSave() {
+  if (!draftReady) return
+  clearTimeout(draftTimer)
+  draftTimer = setTimeout(() => void saveDraft(), 800)
+}
+watch([prompt, selectedId, providerChoice, references], () => scheduleDraftSave(), { deep: true })
+watch(paramValues, () => scheduleDraftSave(), { deep: true })
+
+function serializableRefs(): any[] {
+  return references.value.map((r) => ({
+    kind: r.kind,
+    assetId: r.assetId,
+    name: r.name,
+    thumbUrl: r.thumbUrl || '',
+    // data: URL 太大不进草稿（已入库的用 assetId 恢复；http 外链原样保留）
+    dataUrl: r.dataUrl.startsWith('data:')
+      ? (r.dataUrl.length > 200_000 ? '' : r.dataUrl)
+      : r.dataUrl,
+  }))
+}
+async function saveDraft() {
+  try {
+    await api.put('/api/workspace/draft', {
+      generate: {
+        model: selectedId.value,
+        prompt: prompt.value,
+        params: paramValues.value,
+        provider_choice: providerChoice.value,
+        references: serializableRefs(),
+      },
+    })
+  } catch (e) { console.warn('草稿保存失败', e) }
+}
+async function applyDraft() {
+  let d: any = null
+  try { d = (await api.get('/api/workspace/draft')).data?.generate } catch {}
+  if (!d) return
+  suppressDirty = true
+  try {
+    if (typeof d.prompt === 'string') prompt.value = d.prompt
+    if (Array.isArray(d.references)) {
+      references.value = d.references
+        .filter((r: any) => r && (r.assetId || r.dataUrl))
+        .map((r: any) => ({
+          kind: r.assetId ? 'library' as const : (r.dataUrl.startsWith('http') ? 'url' as const : 'upload' as const),
+          assetId: r.assetId || null,
+          dataUrl: r.dataUrl || '',
+          name: r.name || '参考图',
+          thumbUrl: r.thumbUrl || '',
+        }))
+    }
+    if (d.model) {
+      try { await selectModel(d.model) } catch {}
+    }
+    if (d.params && typeof d.params === 'object') {
+      for (const [k, v] of Object.entries(d.params)) paramValues.value[k] = v
+    }
+    providerChoice.value = d.provider_choice ?? ''
+  } finally {
+    await nextTick()
+    suppressDirty = false
+    dirty.value = false
+  }
+}
+/** 还原前快照：工作区有未保存改动则先存成一条新历史（无图快照），再打开旧记录 */
+async function snapshotWorkspace() {
+  if (!dirty.value) return
+  if (!prompt.value.trim() && !references.value.length) {
+    dirty.value = false
+    return
+  }
+  try {
+    await api.post('/api/history', {
+      model: selectedId.value,
+      prompt: prompt.value.trim(),
+      params: { ...paramValues.value },
+      provider_choice: providerChoice.value || null,
+      reference_ids: references.value.map((r) => r.assetId).filter(Boolean),
+      images: [],
+      usage: null,
+      error: null,
+    })
+    await loadHistory()
+    ElMessage.success('当前工作已快照为一条新历史')
+  } catch (e) { console.warn('快照保存失败', e) }
+}
+
 const canGenerate = computed(() => !!selectedId.value && !!prompt.value.trim() && !generating.value)
-const refsPreview = computed(() => references.value.map(refSrc))
+const refsPreview = computed(() => references.value.map(refPreviewSrc))
 
 async function loadModels() {
   // 初始只读服务端缓存（快；超 24h 服务端自动回源）；手动刷新走 refreshModels/refreshBalance
@@ -186,9 +401,10 @@ async function loadModels() {
     models.value = Array.isArray(list) ? list : []
     await loadBalance()
     try { folders.value = (await api.get('/api/assets/folders')).data } catch {}
-  // 入库默认文件夹：有「上传素材」则预选
+  // 入库默认文件夹：优先「生成图片」，兼容老数据回落「上传素材」
   if (!stockFolder.value) {
-    const hit = folders.value.find((f: any) => f.path === '上传素材' || f.name === '上传素材')
+    const hit = folders.value.find((f: any) => f.path === '生成图片' || f.name === '生成图片')
+      || folders.value.find((f: any) => f.path === '上传素材' || f.name === '上传素材')
     if (hit) stockFolder.value = hit.id
   }
   } catch (e: any) { ElMessage.error(e.response?.data?.detail || e.message) }
@@ -256,27 +472,17 @@ async function imgToB64(img: GenImg): Promise<{ b64: string; mime: string }> {
   return { b64: dataUrl.split(',')[1], mime: blob.type || 'image/png' }
 }
 
-/* ---- 参考图：上传即自动入库，也可从库选择 ---- */
+/* ---- 参考图：上传即自动入库，也可从库选择 ----
+   prompt 下方一律显示缩略图（/thumb），点击预览才看原图 */
 function refSrc(r: RefItem): string {
+  if (r.dataUrl.startsWith('data:')) return r.dataUrl
+  if (r.assetId) return authUrl(`/api/assets/${r.assetId}/thumb`)
+  return r.dataUrl
+}
+function refPreviewSrc(r: RefItem): string {
   if (r.dataUrl.startsWith('data:')) return r.dataUrl
   if (r.assetId) return authUrl(`/api/assets/${r.assetId}/file`)
   return r.dataUrl
-}
-/** 参考图发给 OpenRouter 前统一转成 dataURL（库选择的按需拉取原图字节） */
-async function refPayloadUrl(r: RefItem): Promise<string> {
-  if (r.dataUrl.startsWith('data:')) return r.dataUrl
-  const u = r.assetId ? authUrl(`/api/assets/${r.assetId}/file`) : r.dataUrl
-  const res = await fetch(u)
-  if (!res.ok) throw new Error(`参考图拉取失败 (${res.status})：${r.name}`)
-  const blob = await res.blob()
-  const dataUrl: string = await new Promise((res2, rej) => {
-    const fr = new FileReader()
-    fr.onload = () => res2(String(fr.result))
-    fr.onerror = () => rej(new Error('读取图片失败'))
-    fr.readAsDataURL(blob)
-  })
-  r.dataUrl = dataUrl
-  return dataUrl
 }
 async function stockRefAsset(blob: Blob, name: string): Promise<string | null> {
   try {
@@ -346,68 +552,107 @@ async function loadLibAssets() {
   if (libQ.value) p.q = libQ.value
   libAssets.value = (await api.get('/api/assets', { params: p })).data
 }
-/* 素材库点击即加入/移除参考图 */
+/* 素材库点击即加入/移除参考图：只存 assetId + thumb_url，不下载原图 */
 function toggleLibRef(a: any) {
   const i = references.value.findIndex((r) => r.assetId === a.id)
   if (i >= 0) references.value.splice(i, 1)
-  else references.value.push({ kind: 'library', assetId: a.id, dataUrl: '', name: a.filename })
+  else references.value.push({ kind: 'library', assetId: a.id, dataUrl: '', thumbUrl: a.thumb_url || '', name: a.filename })
 }
 
 async function generate() {
   if (!canGenerate.value) return
-  generating.value = true; error.value=''; usageText.value=''; currentImages.value=[]
+  generating.value = true; error.value = ''; usageText.value = ''; currentImages.value = []
+  resetStages(); startElapsed()
+  genAbort = new AbortController()
+  setStage('sent', 'process', `模型 ${selectedId.value} · 参考图 ${references.value.length} 张`)
   const cleaned = cleanParams(paramValues.value)
   const { stream, ...rest } = cleaned as any
-  let inputRefs = undefined
-  try {
-    if (references.value.length) {
-      const urls = []
-      for (const r of references.value) urls.push(await refPayloadUrl(r))
-      inputRefs = urls.map((u) => ({ type: 'image_url' as const, image_url: { url: u } }))
-    }
-  } catch (e: any) {
-    error.value = e.message || String(e)
-    ElMessage.error(error.value)
-    generating.value = false
-    return
+  // 库选择的图只发 assetId，由服务端读盘组装；上传/URL 的才由客户端带 dataURL/原地址
+  const libIds = references.value.filter((r) => r.kind === 'library' && r.assetId).map((r) => r.assetId as string)
+  const clientRefs: any[] = []
+  for (const r of references.value) {
+    if (r.kind === 'library') continue
+    if (!r.dataUrl) continue
+    clientRefs.push({ type: 'image_url' as const, image_url: { url: r.dataUrl } })
   }
   const body = {
     model: selectedId.value, prompt: prompt.value.trim(),
-    params: { ...rest, input_references: inputRefs,
+    reference_ids: libIds,
+    params: { ...rest, input_references: clientRefs.length ? clientRefs : undefined,
       provider: providerChoice.value ? { only: [providerChoice.value] } : undefined },
   }
   const refIds = references.value.map((r) => r.assetId).filter(Boolean) as string[]
+  const applyServerStage = (ev: any) => {
+    if (!ev || ev.type !== 'stage') return
+    const msg = ev.message || ''
+    switch (ev.stage) {
+      case 'received': setStage('sent', 'finish'); setStage('received', 'finish', msg || '服务器已收到请求'); setStage('forwarding', 'process'); break
+      case 'assembling': setStage('sent', 'finish'); setStage('received', 'finish'); setStage('forwarding', 'process', msg); break
+      case 'forwarding': setStage('sent', 'finish'); setStage('received', 'finish'); setStage('forwarding', 'process', msg); break
+      case 'upstream_connected': setStage('forwarding', 'finish', msg || '已转发给 OpenRouter'); setStage('generating', 'process'); break
+      case 'generating': setStage('forwarding', 'finish'); setStage('generating', 'process', msg); break
+      case 'downloading': setStage('generating', 'finish'); setStage('downloading', 'process', msg); break
+      case 'error': setStage('forwarding', 'error', msg); setStage('generating', 'error', msg); break
+    }
+  }
   try {
     if (stream) {
+      setStage('sent', 'finish'); setStage('received', 'process', '等待服务器确认…')
       const token = localStorage.getItem('access_token')
-      const resp = await fetch('/api/openrouter/images/stream', { method:'POST', headers:{'Content-Type':'application/json', Authorization:`Bearer ${token}`}, body: JSON.stringify(body), credentials:'include' })
-      const reader = resp.body!.getReader(); const dec = new TextDecoder(); let buf=''
+      const resp = await fetch('/api/openrouter/images/stream', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body), credentials: 'include', signal: genAbort.signal })
+      if (!resp.ok || !resp.body) throw new Error(`服务器拒绝 (${resp.status})`)
+      setStage('received', 'finish', '服务器已收到请求')
+      const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = ''
       let doneUsage: any = undefined
-      for(;;){ const {done,value} = await reader.read(); if(done) break
-        buf += dec.decode(value,{stream:true})
-        for (const line of buf.split('\n')) { const t=line.trim(); if(!t.startsWith('data:')) continue
-          const p=t.slice(5).trim(); if(p==='[DONE]') break
-          try{ const ev=JSON.parse(p)
-            if(ev.type==='image_generation.completed'&&ev.b64_json){ currentImages.value=[{b64_json:ev.b64_json,media_type:ev.media_type}]; if(ev.usage){ doneUsage = ev.usage; usageText.value=`cost: $${ev.usage.cost??'?'}'` }
-              /* 流式完成也不自动入库，需用户逐张点击「入库」 */ }
-            else if(ev.type==='error') throw new Error(ev.error?.message||'流式失败')
-          }catch(e){ if(e instanceof Error && e.message!=='流式失败') continue; else throw e } }
+      const handleLine = (t: string) => {
+        const p = t.slice(5).trim(); if (!p) return
+        if (p === '[DONE]') return
+        let ev: any = null
+        try { ev = JSON.parse(p) } catch { return }
+        if (ev.type === 'stage') { applyServerStage(ev); return }
+        if (ev.type === 'image_generation.completed' && ev.b64_json) {
+          currentImages.value = [{ b64_json: ev.b64_json, media_type: ev.media_type }]
+          if (ev.usage) { doneUsage = ev.usage; usageText.value = `cost: $${ev.usage.cost ?? '?'}` }
+          setStage('generating', 'finish'); setStage('downloading', 'finish', '图片已回传')
+        } else if (ev.type === 'error') throw new Error(ev.error?.message || '流式失败')
       }
-      await pushHistory({ images: currentImages.value, usage: doneUsage, refIds, paramsSnapshot: rest })
+      for (;;) {
+        const { done, value } = await reader.read(); if (done) break
+        buf += dec.decode(value, { stream: true })
+        const lines = buf.split('\n'); buf = lines.pop() ?? ''
+        for (const line of lines) { const t = line.trim(); if (!t.startsWith('data:')) continue; handleLine(t) }
+      }
+      if (buf.trim().startsWith('data:')) { try { handleLine(buf.trim()) } catch (e) { throw e } }
+      setStage('downloading', 'finish', '图片已回传')
+      setStage('saving', 'process', '正在保存历史 + 自动入库「生成图片」…')
+      if (await pushHistory({ images: currentImages.value, usage: doneUsage, refIds, paramsSnapshot: rest })) dirty.value = false
+      await autoStockGenerated(currentImages.value)
+      setStage('saving', 'finish', '已保存')
     } else {
-      const res = await orApi.generate(body)
+      // 非流式无 SSE：本地模拟阶段 + 已耗时，真实进度以服务器返回为准
+      setStage('sent', 'finish'); setStage('received', 'finish', '服务器已收到请求（非流式，等待一次性返回）')
+      setStage('forwarding', 'process', `服务端组装库参考图 ${libIds.length} 张并转发中…`)
+      const res = await api.post('/api/openrouter/images', body, { signal: genAbort.signal }).then((r) => r.data)
+      setStage('forwarding', 'finish'); setStage('generating', 'finish', '上游已返回'); setStage('downloading', 'finish', '图片已下载')
       currentImages.value = res.data
       if (res.usage) usageText.value = `cost: $${res.usage.cost ?? '?'}`
-      /* 生成结果默认不入库，需用户逐张点击「入库」 */
-      await pushHistory({ images: res.data, usage: res.usage, refIds, paramsSnapshot: rest })
+      setStage('saving', 'process', '正在保存历史 + 自动入库…')
+      if (await pushHistory({ images: res.data, usage: res.usage, refIds, paramsSnapshot: rest })) dirty.value = false
+      await autoStockGenerated(res.data)
+      setStage('saving', 'finish', '已保存')
     }
   } catch (e: any) {
-    const msg = e.response?.data?.detail || e.message
-    error.value = msg
-    ElMessage.error(msg)
-    await pushHistory({ images: [], error: msg, refIds, paramsSnapshot: rest })
+    if (e?.name === 'CanceledError' || e?.name === 'AbortError' || /cancel|abort|canceled/i.test(e?.message || '')) {
+      error.value = '已取消本次生成'
+    } else {
+      const msg = e.response?.data?.detail || e.message
+      error.value = msg
+      ElMessage.error(msg)
+    }
+    for (const s of genStages.value) if (s.status === 'process' || s.status === 'wait') { s.status = 'error'; break }
+    await pushHistory({ images: [], error: error.value, refIds, paramsSnapshot: rest })
   }
-  finally { generating.value = false }
+  finally { generating.value = false; stopElapsed(); genAbort = null }
 }
 
 /* ---- 历史：服务端持久化，点击还原 prompt/参数/参考图 ---- */
@@ -415,7 +660,7 @@ const history = ref<any[]>([])
 async function loadHistory() {
   try { history.value = (await api.get('/api/history')).data } catch { history.value = [] }
 }
-async function pushHistory(h: { images: GenImg[]; usage?: any; error?: string; refIds: string[]; paramsSnapshot: any }) {
+async function pushHistory(h: { images: GenImg[]; usage?: any; error?: string; refIds: string[]; paramsSnapshot: any }): Promise<boolean> {
   try {
     const imgs = []
     for (const img of h.images) {
@@ -433,21 +678,31 @@ async function pushHistory(h: { images: GenImg[]; usage?: any; error?: string; r
       error: h.error ?? null,
     })
     await loadHistory()
-  } catch (e) { console.warn('历史保存失败', e) }
+    return true
+  } catch (e) { console.warn('历史保存失败', e); return false }
 }
 async function restoreHistory(h: any) {
-  prompt.value = h.prompt
-  references.value = (h.references ?? []).map((r: any) => ({ kind: 'library' as const, assetId: r.id, dataUrl: '', name: r.filename }))
-  currentImages.value = (h.images ?? []).map((u: string) => ({ url: authUrl(u) }))
-  error.value = h.error ?? ''
-  usageText.value = h.usage ? `cost: $${h.usage.cost ?? '?'} · tokens: ${h.usage.total_tokens ?? '?'}` : ''
-  if (h.model !== selectedId.value) {
-    try { await selectModel(h.model) } catch {}
+  // 先快照当前工作区（有未保存改动时存成一条新历史），再打开旧记录，避免覆盖丢失
+  await snapshotWorkspace()
+  suppressDirty = true
+  try {
+    prompt.value = h.prompt
+    references.value = (h.references ?? []).map((r: any) => ({ kind: 'library' as const, assetId: r.id, dataUrl: '', thumbUrl: r.thumb_url || '', name: r.filename }))
+    currentImages.value = (h.images ?? []).map((u: string) => ({ url: authUrl(u) }))
+    error.value = h.error ?? ''
+    usageText.value = h.usage ? `cost: $${h.usage.cost ?? '?'} · tokens: ${h.usage.total_tokens ?? '?'}` : ''
+    if (h.model !== selectedId.value) {
+      try { await selectModel(h.model) } catch {}
+    }
+    if (h.params) {
+      for (const [k, v] of Object.entries(h.params)) paramValues.value[k] = v
+    }
+    providerChoice.value = h.providerChoice ?? ''
+  } finally {
+    await nextTick()
+    suppressDirty = false
+    dirty.value = false
   }
-  if (h.params) {
-    for (const [k, v] of Object.entries(h.params)) paramValues.value[k] = v
-  }
-  providerChoice.value = h.providerChoice ?? ''
   ElMessage.success(`已还原：${h.model}`)
   window.scrollTo({ top: 0 })
 }
@@ -487,8 +742,9 @@ async function openStock(img: GenImg) {
     stockImg.value = { b64_json: b64, media_type: mime }
   } catch (e: any) { ElMessage.error(e.message || '读取图片失败'); return }
   stockTags.value = ''
-  // 每次打开都把默认库「上传素材」作为预选（若存在）
-  const hit = folders.value.find((f: any) => f.path === '上传素材' || f.name === '上传素材')
+  // 每次打开都把「生成图片」作为预选（若存在），兼容回落「上传素材」
+  const hit = folders.value.find((f: any) => f.path === '生成图片' || f.name === '生成图片')
+    || folders.value.find((f: any) => f.path === '上传素材' || f.name === '上传素材')
   stockFolder.value = hit ? hit.id : (folders.value[0]?.id || '')
   stockOpen.value = true
 }
@@ -499,7 +755,7 @@ async function confirmStock() {
     await api.post('/api/assets/from-generation', {
       b64: stockImg.value.b64_json,
       mime: stockImg.value.media_type || 'image/png',
-      folder_id: stockFolder.value || null, // 空则后端默认归入「上传素材」
+      folder_id: stockFolder.value || null, // 空则后端默认归入「生成图片」
       tags: stockTags.value.split(',').map((s) => s.trim()).filter(Boolean),
       prompt: prompt.value.trim(),
     })
@@ -511,6 +767,8 @@ async function confirmStock() {
 onMounted(async () => {
   await ensureFileToken()
   await loadModels()
+  await applyDraft()
+  draftReady = true
   await loadHistory()
   await loadLibAssets()
 })
@@ -521,6 +779,7 @@ onMounted(async () => {
 @media (max-width:1100px){.gen-wrap{grid-template-columns:1fr}.gen{order:1}}
 .topbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
 .field{margin:12px 0}.kv{color:#888;font-size:12px}.refs{display:flex;gap:8px;flex-wrap:wrap}.ref{position:relative;width:96px;height:96px}.ref .el-image{width:100%;height:100%}
+.stages{margin:12px 0;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,.28);border:1px solid rgba(0,0,0,.5)}
 .result-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.result-item .el-image{width:100%;height:220px}
 .side .result-grid{grid-template-columns:1fr 1fr}.side .result-item .el-image{height:110px}
 .hint{color:#888;font-size:12px;margin-top:4px}

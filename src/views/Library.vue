@@ -130,7 +130,7 @@
   </div>
 </template>
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CaretBottom, CaretRight, Delete, Edit, Files, Folder, FolderOpened, Plus, PriceTag, Rank, Share, Top } from '@element-plus/icons-vue'
 import FolderTreePick from '../components/FolderTreePick.vue'
@@ -405,15 +405,57 @@ function shareUrl(s: any) { return `${location.origin}${s.url}` }
 async function revoke(s: any) { await api.delete(`/api/shares/${s.id}`); reloadShares() }
 
 function preventNav(e: Event) { e.preventDefault() }
+/* ---- 素材库浏览状态：存服务器，刷新回来（文件夹/筛选/排序/滚动） ---- */
+let libDraftReady = false
+let libDraftTimer: any = null
+function scheduleLibDraft() {
+  if (!libDraftReady) return
+  clearTimeout(libDraftTimer)
+  libDraftTimer = setTimeout(() => void saveLibDraft(), 800)
+}
+async function saveLibDraft() {
+  try {
+    await api.put('/api/workspace/draft', {
+      library: {
+        folder_id: folderFilter.value,
+        q: q.value, tags: tags.value, match: match.value, make: make.value,
+        iso_min: isoMin.value ?? null, uploader: uploader.value, sort: sort.value,
+        scroll_top: window.scrollY,
+      },
+    })
+  } catch (e) { console.warn('素材库状态保存失败', e) }
+}
+function onLibScroll() { scheduleLibDraft() }
+watch([folderFilter, q, tags, match, make, isoMin, uploader, sort], () => scheduleLibDraft())
 onMounted(async () => {
-  await ensureFileToken(); await loadFolders(); await load()
+  await ensureFileToken(); await loadFolders();
+  let savedScroll = 0
+  try {
+    const d = (await api.get('/api/workspace/draft')).data?.library
+    if (d) {
+      if (typeof d.folder_id === 'string' && (!d.folder_id || folders.value.some((f: any) => f.id === d.folder_id))) folderFilter.value = d.folder_id
+      if (typeof d.q === 'string') q.value = d.q
+      if (typeof d.tags === 'string') tags.value = d.tags
+      if (d.match === 'all' || d.match === 'any') match.value = d.match
+      if (typeof d.make === 'string') make.value = d.make
+      if (d.iso_min != null) isoMin.value = Number(d.iso_min)
+      if (typeof d.uploader === 'string') uploader.value = d.uploader
+      if (['newest', 'oldest', 'name'].includes(d.sort)) sort.value = d.sort
+      if (typeof d.scroll_top === 'number') savedScroll = d.scroll_top
+    }
+  } catch {}
+  await load()
+  if (savedScroll) window.scrollTo(0, savedScroll)
+  libDraftReady = true
   // 拖到页面空白处也不允许浏览器直接打开文件
   window.addEventListener('dragover', preventNav)
   window.addEventListener('drop', preventNav)
+  window.addEventListener('scroll', onLibScroll, { passive: true })
 })
 onUnmounted(() => {
   window.removeEventListener('dragover', preventNav)
   window.removeEventListener('drop', preventNav)
+  window.removeEventListener('scroll', onLibScroll)
 })
 </script>
 <style scoped>

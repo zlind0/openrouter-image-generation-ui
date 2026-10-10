@@ -178,3 +178,12 @@ class GenerationHistory(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     cost: Mapped[float | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WorkspaceDraft(Base):
+    """工作区草稿（每用户一行）：生成页的 prompt/模型/参数/参考图、素材库的筛选滚动，
+    自动保存，刷新不丢失；点历史还原前工作区也会先快照成一条历史。"""
+    __tablename__ = "workspace_drafts"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    data_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
