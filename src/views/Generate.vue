@@ -26,7 +26,7 @@
           <el-alert v-if="h.error" :title="h.error" type="error" show-icon :closable="false" />
           <div v-else class="result-grid">
             <div v-for="(t, i) in h.thumbs" :key="i" class="result-item">
-              <el-image :src="authUrl(t)" fit="cover" :preview-src-list="h.images.map(authUrl)" :initial-index="i" @click.stop />
+              <el-image :src="authUrl(t)" fit="cover" class="zoomable" @click.stop="openHistViewer(h, i)" />
             </div>
           </div>
           <div v-if="h.usage" class="cost">cost: {{ h.usage.cost ?? '—' }} · tokens: {{ h.usage.total_tokens }}</div>
@@ -96,7 +96,7 @@
         </el-input>
       </div>
       <div class="refs"><div v-for="(r,i) in references" :key="i" class="ref" :title="r.name + (r.assetId ? '（已入库）' : '（未入库）')">
-        <el-image :src="refSrc(r)" fit="cover" :preview-src-list="refsPreview" :initial-index="i" />
+        <el-image :src="refSrc(r)" fit="cover" class="zoomable" @click="openRefViewer(i)" />
         <el-button class="ref-del" size="small" circle type="danger" @click="references.splice(i,1)">×</el-button>
       </div></div>
     </div>
@@ -113,7 +113,7 @@
     <div v-if="usageText" style="margin-top:8px">{{ usageText }}</div>
     <div v-if="currentImages.length" class="result-grid" style="margin-top:12px">
       <div v-for="(img,i) in currentImages" :key="i" class="result-item">
-        <el-image :src="imgDisplayUrl(img)" fit="cover" :preview-src-list="currentImages.map(imgDisplayUrl)" :initial-index="i" />
+        <el-image :src="imgDisplayUrl(img)" fit="cover" class="zoomable" @click="openResultViewer(i)" />
         <div style="display:flex;gap:6px;margin-top:6px">
           <el-button size="small" @click="saveImage(img,i)">下载</el-button>
           <el-button size="small" type="primary" @click="openStock(img)">入库</el-button>
@@ -137,6 +137,16 @@
         <el-button type="primary" :loading="stocking" @click="confirmStock">确认入库</el-button>
       </template>
     </el-dialog>
+    <!-- 统一全屏预览：teleport 到 body，不受 96px 小格/抽屉层级约束 -->
+    <teleport to="body">
+      <el-image-viewer v-if="refViewerShow" :url-list="refsPreview" :initial-index="refViewerIndex" :z-index="9999" infinite hide-on-click-modal @close="refViewerShow = false" />
+    </teleport>
+    <teleport to="body">
+      <el-image-viewer v-if="histViewerShow" :key="histViewerKey" :url-list="histViewerList" :initial-index="histViewerIndex" :z-index="9999" infinite hide-on-click-modal @close="histViewerShow = false" />
+    </teleport>
+    <teleport to="body">
+      <el-image-viewer v-if="resultViewerShow" :url-list="resultPreviewList" :initial-index="resultViewerIndex" :z-index="9999" infinite hide-on-click-modal @close="resultViewerShow = false" />
+    </teleport>
   </div>
   </div>
 </template>
@@ -398,6 +408,33 @@ async function snapshotWorkspace() {
 
 const canGenerate = computed(() => !!selectedId.value && !!prompt.value.trim() && !generating.value)
 const refsPreview = computed(() => references.value.map(refPreviewSrc))
+
+/* ---- 统一全屏预览（参考图 / 历史 / 生成结果） ---- */
+const refViewerShow = ref(false)
+const refViewerIndex = ref(0)
+async function openRefViewer(i: number) {
+  await ensureFileToken()
+  refViewerIndex.value = i
+  refViewerShow.value = true
+}
+const histViewerShow = ref(false)
+const histViewerList = ref<string[]>([])
+const histViewerIndex = ref(0)
+const histViewerKey = ref(0)
+async function openHistViewer(h: any, i: number) {
+  await ensureFileToken()
+  histViewerList.value = (h.images ?? []).map(authUrl)
+  histViewerIndex.value = i
+  histViewerKey.value++
+  histViewerShow.value = true
+}
+const resultViewerShow = ref(false)
+const resultViewerIndex = ref(0)
+const resultPreviewList = computed(() => currentImages.value.map(imgDisplayUrl))
+function openResultViewer(i: number) {
+  resultViewerIndex.value = i
+  resultViewerShow.value = true
+}
 
 async function loadModels() {
   // 初始只读服务端缓存（快；超 24h 服务端自动回源）；手动刷新走 refreshModels/refreshBalance
@@ -787,6 +824,7 @@ onMounted(async () => {
 @media (max-width:1100px){.gen-wrap{grid-template-columns:1fr}.gen{order:1}}
 .topbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
 .field{margin:12px 0}.kv{color:#888;font-size:12px}.refs{display:flex;gap:8px;flex-wrap:wrap}.ref{position:relative;width:96px;height:96px}.ref .el-image{width:100%;height:100%}
+.zoomable{cursor:zoom-in}
 .stages{margin:12px 0;padding:10px 12px;border-radius:8px;background:rgba(0,0,0,.28);border:1px solid rgba(0,0,0,.5)}
 .result-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.result-item .el-image{width:100%;height:220px}
 .side .result-grid{grid-template-columns:1fr 1fr}.side .result-item .el-image{height:110px}
